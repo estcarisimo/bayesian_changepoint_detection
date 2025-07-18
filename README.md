@@ -188,6 +188,16 @@ partition, data = generate_mean_shift_example(3, 50)
 print(f"Generated test data: {data.shape}")
 ```
 
+Or run the comprehensive test script:
+
+```bash
+# Run quick test (after installation)
+python quick_test.py
+
+# Run example (from project root, without installation)
+PYTHONPATH=. python examples/simple_example.py
+```
+
 ### Development Setup
 
 For contributors and developers:
@@ -304,9 +314,16 @@ print("Detected changepoints at:", torch.where(changepoint_probs > 0.5)[0])
 ```python
 from bayesian_changepoint_detection import (
     offline_changepoint_detection,
-    const_prior,
-    StudentT as OfflineStudentT
+    const_prior
 )
+from bayesian_changepoint_detection.offline_likelihoods import StudentT as OfflineStudentT
+
+# Generate sample data (same as above)
+data = torch.cat([
+    torch.randn(50) + 0,      # First segment: mean=0
+    torch.randn(50) + 3,      # Second segment: mean=3
+    torch.randn(50) + 0,      # Third segment: mean=0
+])
 
 # Use offline method for batch processing
 prior_func = partial(const_prior, p=1/(len(data)+1))
