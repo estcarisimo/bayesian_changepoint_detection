@@ -171,6 +171,41 @@ python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
 python -c "import torch; print(f'GPU name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"No GPU\"}')"
 ```
 
+## GPU/CUDA Acceleration
+
+The library provides GPU acceleration for significant performance improvements. Here's a quick example:
+
+```python
+import torch
+from functools import partial
+from bayesian_changepoint_detection import online_changepoint_detection, constant_hazard
+from bayesian_changepoint_detection.online_likelihoods import StudentT
+
+# Automatic device selection (chooses GPU if available)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Generate sample data and move to GPU
+data = torch.cat([torch.randn(100), torch.randn(100) + 3]).to(device)
+
+# Set up GPU-enabled model
+hazard_func = partial(constant_hazard, 250)
+likelihood = StudentT(alpha=0.1, beta=0.01, device=device)
+
+# Run detection on GPU
+run_length_probs, changepoint_probs = online_changepoint_detection(
+    data, hazard_func, likelihood
+)
+
+print("Detected changepoints:", torch.where(changepoint_probs > 0.5)[0])
+```
+
+**Performance Benefits:**
+- 10-100x speedup on compatible hardware
+- Especially beneficial for large datasets (>1000 points) and multivariate data
+- Automatic memory management and device detection
+
+📖 **For a complete GPU guide with benchmarks, multivariate examples, and memory management tips, see [docs/gpu_acceleration_guide.md](docs/gpu_acceleration_guide.md)**
+
 ### Verify Installation
 
 Test your installation:
