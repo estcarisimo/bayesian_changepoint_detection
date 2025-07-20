@@ -204,7 +204,9 @@ print("Detected changepoints:", torch.where(changepoint_probs > 0.5)[0])
 - Especially beneficial for large datasets (>1000 points) and multivariate data
 - Automatic memory management and device detection
 
-📖 **For a complete GPU guide with benchmarks, multivariate examples, and memory management tips, see [docs/gpu_acceleration_guide.md](docs/gpu_acceleration_guide.md)**
+📖 **For a complete GPU guide with benchmarks, multivariate examples, and memory management tips, see**
+- **[docs/gpu_offline_detection_guide.md](docs/gpu_offline_detection_guide.md)**
+- **[docs/gpu_online_detection_guide.md](docs/gpu_online_detection_guide.md)**
 
 ### Verify Installation
 
