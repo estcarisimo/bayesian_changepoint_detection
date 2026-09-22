@@ -1,0 +1,65 @@
+name: Docs site
+
+# Publishes the documentation of hildensia/bayesian_changepoint_detection to
+# https://estcarisimo.github.io/bayesian_changepoint_detection/.
+#
+# This file exists only on the fork estcarisimo/bayesian_changepoint_detection:
+# enabling GitHub Pages on the upstream repository needs its owner, so the
+# fork hosts the site. The job always builds upstream `master`, not the fork's
+# own branch, so the fork never has to be kept in sync for the site to be
+# current. It runs daily, on demand, and when the fork's master changes.
+# (GitHub disables scheduled workflows after 60 days without a commit to the
+# repository; re-enable it from the Actions tab or run it by hand.)
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'estcarisimo/bayesian_changepoint_detection'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: hildensia/bayesian_changepoint_detection
+          ref: master
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install PyTorch (CPU), the package and the docs extra
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[docs]"
+      - name: Build the site
+        run: |
+          mkdocs build --strict
+          echo "Built from hildensia/bayesian_changepoint_detection@$(git rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
