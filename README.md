@@ -1,612 +1,640 @@
-# Bayesian Changepoint Detection
+# 📈 Bayesian Changepoint Detection
+<!-- --8<-- [start:intro] -->
 
+Find the points where a time series changes regime, with calibrated posterior
+probabilities instead of a threshold. Online (Adams & MacKay 2007) and offline
+(Fearnhead 2006) Bayesian changepoint detection on PyTorch tensors, with
+conjugate Normal-Gamma and Normal-Wishart likelihoods for univariate and
+multivariate series.
+
+[![CI](https://github.com/hildensia/bayesian_changepoint_detection/actions/workflows/ci.yml/badge.svg)](https://github.com/hildensia/bayesian_changepoint_detection/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/bayesian-changepoint.svg)](https://pypi.org/project/bayesian-changepoint/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/LICENSE)
 
-A modern, PyTorch-based library for Bayesian changepoint detection in time series data. This library implements both online and offline methods with GPU acceleration support for high-performance computation.
+<!-- --8<-- [end:intro] -->
 
-## Features
+## ✨ Features
+<!-- --8<-- [start:features] -->
 
-- **PyTorch Backend**: Leverages PyTorch for efficient computation and automatic differentiation
-- **GPU Acceleration**: Automatic device detection with support for CUDA and Apple Silicon (MPS)
-- **Online & Offline Methods**: Sequential and batch changepoint detection algorithms
-- **Multiple Distributions**: Support for univariate and multivariate Student's t-distributions
-- **Flexible Priors**: Constant, geometric, and negative binomial prior distributions
-- **Type Safety**: Full type annotations for better development experience
-- **Comprehensive Testing**: Extensive test suite with GPU testing support
+- 🔭 **Online detection**: the run-length posterior after every observation (Adams & MacKay 2007), for streams and for measuring how quickly a change would have been noticed
+- 🔍 **Offline detection**: the exact posterior probability of a changepoint at every position given the whole series (Fearnhead 2006)
+- 🎯 **Calibrated outputs**: probabilities you can threshold, MAP segment starts, and the single most probable segmentation (`viterbi_changepoints`)
+- 📐 **Conjugate likelihoods**: Student-t predictive for univariate data (unknown mean and variance), multivariate-t for vector data (unknown mean and covariance), independent-features and covariance-only variants, Gamma-Poisson for counts, and Normal with known variance for mean changes at a known noise level
+- 🧮 **Verified mathematics**: closed forms checked against `scipy` and against exhaustive enumeration of segmentations; every pinned number in the test suite says where it comes from
+- ⚡ **Vectorized recursions**: both detectors are O(T²) with the inner work on tensors, not Python loops; 1 000 points offline in under 4 s on a laptop CPU
+- 🖥️ **Runs where your tensors are**: CPU, CUDA or Apple MPS through one `device` argument, with measured guidance on when an accelerator is *not* worth it
+- 🪶 **One dependency**: `torch`; NumPy, SciPy and Matplotlib are only needed for the tests and examples
 
-## Installation
+<!-- --8<-- [end:features] -->
 
-This package is published on PyPI as **`bayescd`** — the name
-`bayesian-changepoint-detection` on PyPI belongs to an unrelated project. The
-import name is unaffected:
+## 🚀 Quick Start
+
+### Installation
+<!-- --8<-- [start:install] -->
 
 ```bash
-pip install bayescd
+pip install bayesian-changepoint
 ```
+
+Using [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv add bayesian-changepoint
+```
+
+The import name is `bayesian_changepoint_detection`, whatever the
+distribution is called:
 
 ```python
 import bayesian_changepoint_detection
 ```
 
-The sections below cover the supported installation methods with modern Python
-package managers. Choose the one that best fits your workflow.
+To run the examples and notebooks, add the `plot` extra
+(`pip install "bayesian-changepoint[plot]"`, or `".[plot]"` from a clone).
 
-### Method 1: Using UV (Recommended)
+#### Package names
 
-[UV](https://github.com/astral-sh/uv) is a fast Python package installer and resolver. It's the recommended approach for new projects.
-
-#### Install UV
-```bash
-# macOS and Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# Or with pip
-pip install uv
-```
-
-#### Install the package with UV
-```bash
-# Create a new virtual environment and install
-uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-uv pip install bayescd
-
-# Or install directly with auto-managed environment
-uv run python -c "import bayesian_changepoint_detection; print('Success!')"
-```
-
-#### Development installation with UV
-```bash
-git clone https://github.com/estcarisimo/bayesian_changepoint_detection.git
-cd bayesian_changepoint_detection
-
-# Create virtual environment
-uv venv
-
-# Activate virtual environment
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install in development mode with all dependencies
-uv pip install -e ".[dev]"
-
-# Or install specific dependency groups
-uv pip install -e ".[dev,docs,gpu]"
-```
-
-### Method 2: Using pip with Virtual Environments
-
-#### Create and activate a virtual environment
-```bash
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# On Linux/macOS:
-source venv/bin/activate
-# On Windows:
-venv\Scripts\activate
-
-# Upgrade pip
-pip install --upgrade pip
-```
-
-#### Install the package
-```bash
-# Install from PyPI (when available)
-pip install bayescd
-
-# Or install from source
-git clone https://github.com/estcarisimo/bayesian_changepoint_detection.git
-cd bayesian_changepoint_detection
-pip install -e .
-
-# Install with development dependencies
-pip install -e ".[dev]"
-```
-
-### Method 3: Using conda/mamba
+`bayesian-changepoint` is the distribution name from 1.1.0 on. The same
+project was published before as **`bayescd`** (0.4, April 2022) and, earlier,
+as **`bayesian-changepoint-detection`** (0.2.dev1). Both are frozen at those
+releases and neither gets updates; if you have one installed, replace it:
 
 ```bash
-# Create conda environment
-conda create -n bayesian-cp python=3.9
-conda activate bayesian-cp
-
-# Install PyTorch first (recommended for better compatibility)
-conda install pytorch torchvision torchaudio -c pytorch
-
-# Install the package
-pip install bayescd
-
-# Or from source
-git clone https://github.com/estcarisimo/bayesian_changepoint_detection.git
-cd bayesian_changepoint_detection
-pip install -e ".[dev]"
+pip uninstall bayescd bayesian-changepoint-detection
+pip install bayesian-changepoint
 ```
 
-### Dependency Groups
+The code is the same project and lives in the same repository; only the name
+on PyPI changed. 1.1.0 is a rewrite on PyTorch relative to 0.4 and changes
+the online API relative to 1.0.x — the
+[CHANGELOG](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CHANGELOG.md)
+lists every breaking change.
 
-The package defines several optional dependency groups:
+### System Requirements
 
-- **`dev`**: Development and test tools (pytest, numpy, scipy, black, mypy, etc.)
-- **`plot`**: Plotting for the examples and notebooks (matplotlib, seaborn)
-- **`docs`**: Documentation generation (sphinx, numpydoc)
-- **`gpu`**: GPU support (CUDA-enabled PyTorch)
+- Python 3.9 or higher
+- PyTorch 2.0 or higher (installed automatically). For a CUDA build of
+  PyTorch, install it first following <https://pytorch.org/get-started/locally/>;
+  the CPU build is enough for everything in this README.
 
-The library itself depends only on PyTorch.
+<!-- --8<-- [end:install] -->
 
-#### Install specific groups
-```bash
-# With UV
-uv pip install "bayescd[dev,gpu]"
+## 📖 Usage
+<!-- --8<-- [start:usage] -->
 
-# With pip
-pip install "bayescd[dev,gpu]"
-```
+### Online detection
 
-### GPU Support
-
-For CUDA support, ensure you have CUDA-compatible hardware and drivers, then:
-
-#### Option 1: Install PyTorch with CUDA manually (Recommended)
-```bash
-# Visit https://pytorch.org/get-started/locally/ for the latest commands
-# Example for CUDA 11.8:
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-
-# Example for CUDA 12.1:
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# Then install the package
-pip install bayescd
-# or from source:
-pip install -e .
-```
-
-#### Option 2: Install with GPU extras (May install CPU-only PyTorch)
-```bash
-# Note: The [gpu] extra attempts to install torch[cuda], but this may not always
-# install the GPU version correctly. Option 1 is more reliable.
-
-# UV
-uv pip install "bayescd[gpu]"
-
-# pip
-pip install "bayescd[gpu]"
-```
-
-#### Verify GPU Support
-```bash
-# Check if PyTorch can see your GPU
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
-python -c "import torch; print(f'GPU count: {torch.cuda.device_count()}')"
-python -c "import torch; print(f'GPU name: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"No GPU\"}')"
-```
-
-## GPU/CUDA Acceleration
-
-The library provides GPU acceleration for significant performance improvements. Here's a quick example:
+The online detector processes the series one point at a time and keeps the
+posterior over the *run length*, the number of observations since the last
+change. Two helpers turn that posterior into changepoints.
 
 ```python
-import torch
 from functools import partial
-from bayesian_changepoint_detection import online_changepoint_detection, constant_hazard
-from bayesian_changepoint_detection.online_likelihoods import StudentT
 
-# Automatic device selection (chooses GPU if available)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# Generate sample data and move to GPU
-data = torch.cat([torch.randn(100), torch.randn(100) + 3]).to(device)
-
-# Set up GPU-enabled model
-hazard_func = partial(constant_hazard, 250)
-likelihood = StudentT(alpha=0.1, beta=0.01, device=device)
-
-# Run detection on GPU
-run_length_probs, changepoint_probs = online_changepoint_detection(
-    data, hazard_func, likelihood
-)
-
-print("Detected changepoints:", torch.where(changepoint_probs > 0.5)[0])
-```
-
-**Performance Benefits:**
-- 10-100x speedup on compatible hardware
-- Especially beneficial for large datasets (>1000 points) and multivariate data
-- Automatic memory management and device detection
-
-📖 **For a complete GPU guide with benchmarks, multivariate examples, and memory management tips, see**
-- **[docs/gpu_offline_detection_guide.md](docs/gpu_offline_detection_guide.md)**
-- **[docs/gpu_online_detection_guide.md](docs/gpu_online_detection_guide.md)**
-
-### Verify Installation
-
-Test your installation:
-
-```python
 import torch
-from bayesian_changepoint_detection import get_device_info
 
-# Check device availability
-print(get_device_info())
-
-# Quick test
-from bayesian_changepoint_detection.generate_data import generate_mean_shift_example
-partition, data = generate_mean_shift_example(3, 50)
-print(f"Generated test data: {data.shape}")
-```
-
-Or run one of the examples (they plot, so they need the `plot` extra):
-
-```bash
-pip install -e ".[plot]"
-
-# Run example from the project root
-PYTHONPATH=. python examples/simple_example.py
-
-# Run the test suite (requires the dev extra)
-pip install -e ".[dev]"
-pytest
-```
-
-### Development Setup
-
-For contributors and developers:
-
-```bash
-# Clone the repository
-git clone https://github.com/estcarisimo/bayesian_changepoint_detection.git
-cd bayesian_changepoint_detection
-
-# Option 1: Using UV (recommended)
-uv venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-uv pip install -e ".[dev,docs]"
-
-# Option 2: Using pip
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -e ".[dev,docs]"
-
-# Run tests
-pytest
-# or if pytest is not in PATH:
-python -m pytest
-
-# Run code formatting
-black bayesian_changepoint_detection tests examples
-isort bayesian_changepoint_detection tests examples
-
-# Run type checking
-mypy bayesian_changepoint_detection
-```
-
-### Troubleshooting
-
-#### Common Issues
-
-1. **pytest command not found**
-   ```bash
-   # Option 1: Use python -m pytest
-   python -m pytest
-   
-   # Option 2: Ensure pytest is installed
-   pip install pytest
-   
-   # Option 3: Run just the basic online-detection tests
-   python -m pytest tests/test_online_detection.py
-   ```
-
-2. **PyTorch installation conflicts**
-   ```bash
-   # Uninstall and reinstall PyTorch
-   pip uninstall torch torchvision torchaudio
-   pip install torch torchvision torchaudio
-   ```
-
-2. **CUDA version mismatch**
-   ```bash
-   # Check CUDA version
-   nvidia-smi
-   
-   # Install matching PyTorch version from https://pytorch.org/
-   ```
-
-3. **Virtual environment issues**
-   ```bash
-   # Recreate virtual environment
-   rm -rf venv  # or .venv
-   python -m venv venv
-   source venv/bin/activate
-   pip install --upgrade pip
-   ```
-
-4. **Permission errors**
-   ```bash
-   # Use --user flag if you can't create virtual environments
-   pip install --user bayescd
-   ```
-
-## Quick Start
-
-### Online Changepoint Detection
-
-```python
-import torch
-from functools import partial
 from bayesian_changepoint_detection import (
-    online_changepoint_detection,
+    StudentT,
+    changepoint_probabilities,
     constant_hazard,
-    StudentT
+    get_map_changepoints,
+    online_changepoint_detection,
 )
 
-# Generate sample data
 torch.manual_seed(42)
 data = torch.cat([
-    torch.randn(50) + 0,      # First segment: mean=0
-    torch.randn(50) + 3,      # Second segment: mean=3
-    torch.randn(50) + 0,      # Third segment: mean=0
+    torch.randn(50) + 0,  # first segment: mean 0
+    torch.randn(50) + 3,  # second segment: mean 3
+    torch.randn(50) + 0,  # third segment: mean 0
 ])
 
-# Set up the model
-hazard_func = partial(constant_hazard, 250)  # Expected run length of 250
-likelihood = StudentT(alpha=0.1, beta=0.01, kappa=1, mu=0)
+hazard = partial(constant_hazard, 250)  # prior: one change every ~250 points
+likelihood = StudentT(alpha=0.1, beta=0.01, kappa=1, mu=0)  # unknown mean and variance
 
-# Run online changepoint detection
-run_length_probs, changepoint_probs = online_changepoint_detection(
-    data, hazard_func, likelihood
-)
+R, map_run_lengths = online_changepoint_detection(data, hazard, likelihood)
 
-print("Detected changepoints at:", torch.where(changepoint_probs > 0.5)[0])
+# Index of the first point of each new segment on the MAP run-length path.
+# min_separation merges starts closer than that many points when the
+# posterior hesitates between neighbors.
+print(get_map_changepoints(R, min_separation=10))  # tensor([ 50, 100])
+
+# Or a probability per position, judged `lag` observations later.
+probs = changepoint_probabilities(R, lag=10)  # probs[t] refers to data index t
+print(torch.where(probs[1:] > 0.5)[0] + 1)  # tensor([ 50, 100])
 ```
 
-### Offline Changepoint Detection
+`R[r, t]` is `P(run length = r | first t observations)`. Why not simply
+threshold `R[0, :]`? Under a constant hazard the posterior probability of run
+length 0 is the hazard rate at every step, whatever the data say; the
+evidence for a change at `t` shows up in the *following* columns, as mass at
+run length `k` in column `t + k`. `changepoint_probabilities` reads exactly
+that. `viterbi_changepoints(data, hazard, likelihood)` returns the single
+most probable run-length path instead, i.e. the MAP segmentation.
+
+### Streaming
+
+`online_changepoint_detection` needs the whole series and returns the
+`(T+1)²` matrix `R`. For a stream of unknown length, feed observations one
+at a time to `OnlineChangepointDetector`; it keeps only the current
+run-length posterior. With `max_run_length` the memory and the time per
+observation stay bounded: run lengths above the bound are dropped and the
+posterior renormalized, which is exact until the bound is reached and a
+close approximation afterwards when segments are shorter than the bound.
 
 ```python
-from bayesian_changepoint_detection import (
-    offline_changepoint_detection,
-    const_prior
+from bayesian_changepoint_detection import OnlineChangepointDetector
+
+detector = OnlineChangepointDetector(
+    hazard, StudentT(alpha=0.1, beta=0.01, kappa=1, mu=0), max_run_length=500
 )
+starts = []
+for x in data:  # any iterable: a socket, a file, a generator
+    detector.update(x)
+    # P(a segment started 10 observations ago), as changepoint_probabilities
+    if detector.t > 10 and detector.changepoint_probability(lag=10) > 0.5:
+        starts.append(detector.t - 10)
+print(starts)  # [50, 100]
+```
+
+Without `max_run_length` each posterior equals the corresponding column of
+`R` from `online_changepoint_detection` (up to float32 rounding).
+
+### Direction and size of each change
+
+`segment_statistics` summarizes the segments between changepoints: mean,
+standard deviation, and for every changepoint the change in mean and a
+Welch z-score (issue #42).
+
+```python
+from bayesian_changepoint_detection import segment_statistics
+
+stats = segment_statistics(data, get_map_changepoints(R, min_separation=10))
+print(stats.means.tolist())         # about [0.096, 3.173, -0.165]
+print(stats.mean_changes.tolist())  # about [3.078, -3.339]: up, then down
+```
+
+The z-score ignores that the changepoints were found in the same data, so
+it overstates significance; treat it as a rough guide. Offline positions
+are the last index of the old segment: pass `positions + 1`.
+
+### Offline detection
+
+The offline detector sees the whole series and returns, for every position,
+the posterior probability that a segment ends there. It is usually sharper
+than the online detector; use it for retrospective analysis.
+
+```python
+from bayesian_changepoint_detection import const_prior, offline_changepoint_detection
 from bayesian_changepoint_detection.offline_likelihoods import StudentT as OfflineStudentT
 
-# Generate sample data (same as above)
-data = torch.cat([
-    torch.randn(50) + 0,      # First segment: mean=0
-    torch.randn(50) + 3,      # Second segment: mean=3
-    torch.randn(50) + 0,      # Third segment: mean=0
-])
+prior = partial(const_prior, p=1 / (len(data) + 1))  # flat prior on segment length
+Q, P, changepoint_log_probs = offline_changepoint_detection(data, prior, OfflineStudentT())
 
-# Use offline method for batch processing
-prior_func = partial(const_prior, p=1/(len(data)+1))
-likelihood = OfflineStudentT()
-
-Q, P, changepoint_log_probs = offline_changepoint_detection(
-    data, prior_func, likelihood
-)
-
-# Get changepoint probabilities
-changepoint_probs = torch.exp(changepoint_log_probs).sum(0)
+changepoint_probs = torch.exp(changepoint_log_probs).sum(0)  # P(a segment ends at t)
+print(torch.where(changepoint_probs > 0.5)[0])  # tensor([49, 99])
 ```
 
-### GPU Acceleration
+The two detectors use different index conventions: online reports the first
+point of the new segment (50), offline the last point of the old one (49).
+See the [FAQ](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/README.md#-faq).
+
+### Multivariate data
+
+Pass a `[T, d]` tensor, one row per observation, and a multivariate
+likelihood; everything else is the same. All three detectors check their
+input first: data must be `[T]` or `[T, d]`, non-empty, real and finite,
+and match the likelihood's `dims`. A transposed `[d, T]` tensor is rejected
+with a hint rather than read as `d` observations.
 
 ```python
-# Automatic GPU detection
-device = get_device()  # Selects best available device
-print(f"Using device: {device}")
+from bayesian_changepoint_detection import MultivariateT
 
-# Force specific device
-likelihood = StudentT(device='cuda')  # Use GPU
-data_gpu = data.to('cuda')
-
-# All computations will run on GPU
-run_length_probs, changepoint_probs = online_changepoint_detection(
-    data_gpu, hazard_func, likelihood
-)
-```
-
-### Multivariate Data
-
-```python
-from bayesian_changepoint_detection.online_likelihoods import MultivariateT
-
-# Generate multivariate data
 dims = 3
-data = torch.cat([
-    torch.randn(50, dims) + torch.tensor([0, 0, 0]),
-    torch.randn(50, dims) + torch.tensor([2, -1, 1]),
-    torch.randn(50, dims) + torch.tensor([0, 0, 0]),
+mv_data = torch.cat([
+    torch.randn(50, dims) + torch.tensor([0.0, 0.0, 0.0]),
+    torch.randn(50, dims) + torch.tensor([2.0, -1.0, 1.0]),
+    torch.randn(50, dims) + torch.tensor([0.0, 0.0, 0.0]),
 ])
 
-# Multivariate likelihood
-likelihood = MultivariateT(dims=dims)
-
-# Run detection
-run_length_probs, changepoint_probs = online_changepoint_detection(
-    data, hazard_func, likelihood
-)
+R, _ = online_changepoint_detection(mv_data, hazard, MultivariateT(dims=dims))
+print(get_map_changepoints(R, min_separation=10))  # tensor([ 48, 100])
 ```
 
-## Mathematical Background
+The first start lands two points early on this draw: the lag-10 posterior
+puts 0.53 on 48, 0.13 on 49 and 0.26 on 50, and the MAP path takes the
+mode. Read `changepoint_probabilities` when the exact position matters.
 
-This library implements Bayesian changepoint detection as described in:
+### Devices
 
-1. **Paul Fearnhead** (2006). "Exact and Efficient Bayesian Inference for Multiple Changepoint Problems." *Statistics and Computing*, 16(2), 203-213.
+Every likelihood and both detectors take a `device` argument. Selection is
+automatic (CUDA, then MPS, then CPU); pass `device="cpu"` to the likelihood
+and the detector to opt out. On a laptop the CPU is the faster choice for
+the online detector (measured: 6–30x faster than MPS), and the offline
+detector always runs on the CPU under MPS because it needs float64. How the
+argument is resolved, what has been measured, how to time your own workload
+and how much memory the tables need: [docs/devices.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/docs/devices.md).
 
-2. **Ryan P. Adams and David J.C. MacKay** (2007). "Bayesian Online Changepoint Detection." *arXiv preprint arXiv:0710.3742*.
+### API at a glance
 
-3. **Xuan Xiang and Kevin Murphy** (2007). "Modeling Changing Dependency Structure in Multivariate Time Series." *ICML*, 1055-1062.
+| Function | Returns |
+|---|---|
+| `online_changepoint_detection(data, hazard, likelihood)` | `R` (run-length posterior, `[T+1, T+1]`) and the MAP run length after each point |
+| `changepoint_probabilities(R, lag)` | `P(a new segment started at t)`, judged `lag` observations later |
+| `get_map_changepoints(R, min_separation=1)` | indices where the MAP run-length path starts a new segment |
+| `viterbi_changepoints(data, hazard, likelihood)` | the single most probable run-length path and its segment starts |
+| `compute_run_length_posterior(data, hazard, likelihood)` | just `R`, for code that only wants the posterior |
+| `segment_statistics(data, starts)` | per-segment mean and std, change in mean and z-score at each changepoint |
+| `OnlineChangepointDetector(hazard, likelihood, max_run_length=None)` | streaming detector: `update(x)`, `run_length_posterior`, `map_run_length`, `changepoint_probability(lag)` |
+| `offline_changepoint_detection(data, prior, likelihood)` | `Q` (log evidence), `P` (segment log likelihoods), `Pcp` (log probability of the j-th changepoint at t) |
+| `constant_hazard(lam, r)` | hazard `1 / lam` for every run length |
+| `negative_binomial_hazard(k, p, r)` | hazard of negative binomial segment lengths (mean `k / p`); the online counterpart of `negative_binomial_prior` |
+| `const_prior`, `geometric_prior`, `negative_binomial_prior` | log prior on segment length for the offline detector |
+| `online_likelihoods.StudentT`, `online_likelihoods.MultivariateT` | online conjugate models (Normal-Gamma, Normal-Wishart) |
+| `offline_likelihoods.StudentT`, `MultivariateT`, `IndependentFeaturesLikelihood`, `FullCovarianceLikelihood` | offline segment marginal likelihoods |
+| `online_likelihoods.Poisson`, `offline_likelihoods.Poisson` | count data: Gamma-Poisson, negative-binomial predictive |
+| `online_likelihoods.NormalKnownVariance`, `offline_likelihoods.NormalKnownVariance` | mean changes with a known noise variance: Normal-Normal, Normal predictive |
+| `get_device`, `get_device_info`, `to_tensor` | device helpers |
 
-### Key Concepts
+All public functions have NumPy-style docstrings with the formulas and the
+paper they come from.
 
-- **Run Length**: Time since the last changepoint
-- **Hazard Function**: Prior probability of a changepoint at each time step
-- **Likelihood Model**: Distribution of observations within segments
-- **Posterior**: Probability distribution over run lengths given data
+<!-- --8<-- [end:usage] -->
 
-## API Reference
+## 🏗️ Architecture
 
-### Core Functions
+```text
+bayesian_changepoint_detection/
+├── __init__.py             # Public API and __version__ (from package metadata)
+├── bayesian_models.py      # The two detectors, viterbi_changepoints, and the R helpers
+├── streaming.py            # OnlineChangepointDetector: the online recursion one observation at a time
+├── segments.py             # segment_statistics: mean, spread and direction of each change
+├── online_likelihoods.py   # Online StudentT and MultivariateT: per-run-length predictive densities
+├── offline_likelihoods.py  # Offline StudentT, MultivariateT, IndependentFeatures, FullCovariance: segment marginals
+├── priors.py               # const_prior, geometric_prior, negative_binomial_prior (segment-length priors)
+├── hazard_functions.py     # constant_hazard, negative_binomial_hazard
+├── device.py               # get_device, get_device_info, to_tensor, ensure_tensor
+└── generate_data.py        # Synthetic series with known changepoints, for tests and examples
+```
 
-- `online_changepoint_detection()`: Sequential changepoint detection
-- `offline_changepoint_detection()`: Batch changepoint detection
+Supporting directories: `tests/` (the suite, see below), `examples/` (scripts
+and two notebooks, run in CI), `docs/` (pages whose code blocks are executed
+by the tests).
 
-### Likelihood Models
+## 🧪 Development
 
-- `StudentT`: Univariate Student's t-distribution (unknown mean and variance)
-- `MultivariateT`: Multivariate Student's t-distribution
+### Setup Development Environment
 
-### Prior Distributions
+```bash
+# Clone repository
+git clone https://github.com/hildensia/bayesian_changepoint_detection.git
+cd bayesian_changepoint_detection
 
-- `const_prior()`: Uniform prior over changepoint locations
-- `geometric_prior()`: Geometric distribution for inter-arrival times
-- `negative_binomial_prior()`: Generalized geometric distribution
+# Install with development dependencies
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"
+# ...or, without uv:  python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
 
-### Hazard Functions
-
-- `constant_hazard()`: Constant probability of changepoint occurrence
-
-### Device Management
-
-- `get_device()`: Automatic device selection
-- `to_tensor()`: Convert data to PyTorch tensors
-- `get_device_info()`: Get information about available devices
-
-## Performance
-
-The PyTorch implementation provides significant performance improvements:
-
-- **Vectorized Operations**: Efficient batch computations
-- **GPU Acceleration**: 10-100x speedup on compatible hardware
-- **Memory Efficiency**: Optimized memory usage for large datasets
-- **Parallel Processing**: Multi-threaded CPU operations
-
-### Benchmarks
-
-*Theoretical estimates, must be benchmarked*
-
-On a typical dataset (1000 time points, univariate):
-
-| Method | Device | Time | Speedup |
-|--------|--------|------|---------|
-| Original (NumPy) | CPU | 2.3s | 1x |
-| PyTorch | CPU | 0.8s | 2.9x |
-| PyTorch | GPU (RTX 3080) | 0.05s | 46x |
-
-## Examples
-
-See the `examples/` directory for complete examples:
-
-- `examples/basic_usage.py`: Simple univariate example
-- `examples/multivariate_example.py`: Multivariate time series
-- `examples/gpu_acceleration.py`: GPU usage examples
-- `examples/Example_Code.ipynb`: Jupyter notebook tutorial
-
-## Development
+# Install pre-commit hooks (ruff lint + format on staged files)
+pre-commit install
+```
 
 ### Running Tests
 
-#### Basic Tests
 ```bash
-# Run the basic online-detection tests (univariate and multivariate)
-python -m pytest tests/test_online_detection.py
+# Run all tests (about 15 s on a CPU)
+pytest
+
+# Only the tests that check the mathematics against independent references
+pytest -m math
+
+# Only the tests that pin current behavior (contracts, edge cases, devices, goldens)
+pytest -m behavior
+
+# With coverage
+pytest --cov=bayesian_changepoint_detection --cov-report=term-missing
+
+# One file
+pytest tests/test_online_detection.py -v
 ```
 
-#### Full Test Suite
-```bash
-# First, install development dependencies
-pip install -e ".[dev]"
-
-# Run all tests in the tests/ directory
-pytest tests/
-# or if pytest is not in PATH:
-python -m pytest tests/
-
-# Run with verbose output
-pytest tests/ -v
-
-# Run with coverage report
-pytest tests/ --cov=bayesian_changepoint_detection
-# or:
-python -m pytest tests/ --cov=bayesian_changepoint_detection
-
-# Run specific test files
-pytest tests/test_device.py
-pytest tests/test_online_likelihoods.py
-
-# Run GPU tests only (requires CUDA)
-pytest tests/ -m gpu
-
-# Run non-GPU tests only
-pytest tests/ -m "not gpu"
-```
-
-The full test suite includes:
-- Device management tests
-- Online and offline likelihood tests  
-- Prior distribution tests
-- Integration tests with regression testing
-- GPU computation tests (when CUDA available)
+Every test carries exactly one of the markers `math` and `behavior`;
+collection fails otherwise. Tests pass `device="cpu"` explicitly, because
+device selection is automatic and the suite is much slower on an accelerator.
+The Python blocks in this README and in `docs/` are executed as part of the
+suite.
 
 ### Code Quality
 
 ```bash
+# Lint with ruff
+ruff check .
+
 # Format code
-black bayesian_changepoint_detection tests
+ruff format .
 
-# Sort imports
-isort bayesian_changepoint_detection tests
-
-# Type checking
+# Type checking (configured, advisory: not enforced in CI)
 mypy bayesian_changepoint_detection
-
-# Linting
-flake8 bayesian_changepoint_detection tests
 ```
 
-## Migration from v0.4
+`ruff check` and `ruff format --check` are enforced in CI, together with the
+test suite on Python 3.9–3.13, the example scripts, and a build job that
+installs the wheel into a clean environment. See
+[CONTRIBUTING.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CONTRIBUTING.md) for the workflow and the review process.
 
-The new PyTorch-based API maintains compatibility while offering performance improvements:
+### Building
 
-```python
-# Old API (still works)
-import bayesian_changepoint_detection.offline_changepoint_detection as offcd
-Q, P, Pcp = offcd.offline_changepoint_detection(data, prior_func, likelihood_func)
+```bash
+# Build sdist and wheel
+python -m build
 
-# New PyTorch API (recommended)
-from bayesian_changepoint_detection import offline_changepoint_detection
-Q, P, Pcp = offline_changepoint_detection(data, prior_func, likelihood)
+# Check the metadata PyPI will see
+twine check --strict dist/*
 ```
 
-## Contributing
+## 📊 Example Output
 
-Contributions are welcome! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+`examples/simple_example.py` runs both detectors on a 150-point series with
+changes at 50 and 100 and saves a figure:
 
-## License
+```text
+============================================================
+Bayesian Changepoint Detection - Simple Example
+============================================================
+Generated data with 150 points
+True changepoints at: [50, 100]
+Running online changepoint detection...
+✓ Online detection completed
+  Segment starts on the MAP path: [50, 100]
+  Max lag-10 changepoint probability (t > 0): 0.9117
+Running offline changepoint detection...
+✓ Offline detection completed
+  Max changepoint probability: 0.9322
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Detected changepoints:
+  Online method: [50, 100]...
+  Offline method: [49, 99]...
+Creating visualization...
+✓ Visualization saved as 'changepoint_detection_results.png'
 
-## Citation
+============================================================
+✅ Example completed successfully!
+============================================================
+```
 
-If you use this library in your research, please cite:
+Other scripts in `examples/`: `basic_usage.py` (400 points, four segments,
+both detectors), `multivariate_example.py`, `gpu_acceleration.py` (device
+selection and CPU/GPU comparison), `benchmark_offline.py` (offline timing at
+several lengths), and the notebooks `Example_Code.ipynb` and
+`Multivariate_Example.ipynb`. The scripts run in CI on every push.
+
+## ⚡ Performance
+<!-- --8<-- [start:performance] -->
+
+Both algorithms are O(T²) in the series length: the offline recursion is
+vectorized per start point (one `pdf_rows` call gives the likelihood of every
+segment starting there), the online recursion over run lengths at each step.
+Memory is also O(T²): the run-length posterior `R` is `(T+1)²` float32, the
+offline tables about `16 T²` bytes (see [docs/devices.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/docs/devices.md#memory)).
+`OnlineChangepointDetector` with `max_run_length=K` is O(K) in memory and
+time per observation instead.
+
+Measured on an Apple M-series laptop, CPU, 4 threads, PyTorch 2.14:
+
+| Workload | Time |
+|---|---|
+| Offline `StudentT`, 1 000 points, `const_prior`, exact sum | 3.6 s (147 s before the vectorized likelihood of 1.1.0, same changepoints) |
+| Online `StudentT`, 1 000 points | 0.16 s |
+| Online `StudentT`, 5 000 points | 1.7 s |
+| Online `MultivariateT`, 10-D, 1 000 points | 0.56 s |
+| `OnlineChangepointDetector`, `StudentT`, 20 000 points, `max_run_length=500` | 2.6 s (128 µs per point, flat) |
+
+Accelerators: see the FAQ; MPS is slower than the CPU on all of these, CUDA
+is unmeasured (issue #43). Only measured numbers appear in this README.
+
+<!-- --8<-- [end:performance] -->
+
+## ❓ FAQ
+<!-- --8<-- [start:faq] -->
+
+### Which detector should I use, online or offline?
+
+`online_changepoint_detection` (Adams & MacKay 2007) processes the series one
+point at a time and, after each point, gives the posterior over how long the
+current segment has lasted. Use it for streams, or when you want to know how
+quickly a change would have been noticed. `offline_changepoint_detection`
+(Fearnhead 2006) sees the whole series and returns the posterior probability
+of a changepoint at each position, using data on both sides of it. Use it for
+retrospective analysis; it is usually sharper. Both cost O(T²).
+
+### The two detectors report the same change at indices one apart. Why?
+
+Different conventions, both documented in the docstrings:
+
+- Online (`get_map_changepoints`, `changepoint_probabilities`,
+  `viterbi_changepoints`): the index of the **first point of the new
+  segment**. A series whose first 80 points come from one regime reports 80.
+- Offline (`Pcp[j, t]`, and `torch.exp(Pcp).sum(0)[t]`): the probability that
+  a segment **ends at `t`**, i.e. the last point of the old regime. The same
+  series reports 79.
+
+So `offline index + 1 == online index`.
+
+### Does the scale of my data matter? (issue #34)
+
+Yes. The priors are on the mean and variance of the data, so their
+hyperparameters have units, and rescaling the data without rescaling them
+changes the model. For the univariate Normal-Gamma model (online `StudentT`
+with `alpha, beta, kappa, mu`; offline `StudentT` with `alpha0, beta0,
+kappa0, mu0`):
+
+| parameter | meaning | units |
+|---|---|---|
+| `mu` | prior mean of a segment | data units |
+| `kappa` | how many observations the prior mean is worth | none |
+| `alpha` | half the number of observations the variance prior is worth | none |
+| `beta` | `alpha` times the prior guess of the variance | data units² |
+
+Multiplying the data by `c` is equivalent to using `mu * c` and `beta * c²`
+with `kappa` and `alpha` unchanged. With `beta / alpha` far from the actual
+within-segment variance, or `mu` far from the data, the first points of
+every segment look surprising and the detector over- or under-reacts.
+
+Practical choices: standardize the data (subtract a typical level, divide by
+a typical within-segment standard deviation, ideally estimated on a
+calibration window rather than on the whole series), or set `mu` to the
+expected level and `beta = alpha * expected_variance`. The values in the
+examples (`alpha=0.1, beta=0.01, kappa=1, mu=0`) encode "around zero,
+variance about 0.1, but I am not sure": with `df = 2 * alpha = 0.2` the
+predictive is extremely heavy-tailed, which is why they still work on
+roughly unit-scale data.
+
+The multivariate classes work the same way but parametrize the prior on
+the covariance differently. Online `MultivariateT` takes `scale`, the
+Wishart scale `W` on the *precision*: to encode a prior covariance `C` pass
+`scale = inv(C) / dof` (default `I / dof`, unit prior covariance). Offline
+`MultivariateT` takes `Psi0`, the inverse-Wishart scale on the *covariance*
+side (`Psi0 = inv(W)`): the same prior covariance `C` is `Psi0 = dof0 * C`,
+and the default `dof0 * I` is the same unit prior covariance as online.
+`mu`/`mu0` are in data units in both.
+
+**Data far from zero** (timestamps, prices, counters) is handled without
+loss of precision: the offline likelihoods compute their statistics on data
+centered on its mean, and the online ones keep their state relative to the
+first observation, so an offset of 1e8 gives the same result as the same
+series around 0. Pass such data as float64 (a `float64` tensor or NumPy
+array): a float32 value near 1e8 is only resolved to steps of 8, before
+the detector ever sees it.
+
+### How do I make the detector more or less sensitive? (issue #31)
+
+In order of importance:
+
+1. **The hazard, i.e. the expected segment length.** `constant_hazard(lam)`
+   puts prior probability `1 / lam` on a change at every step. Larger `lam`
+   means fewer detections, more confidence needed, slightly longer delay;
+   smaller `lam` means more, earlier, and more false alarms. This is the main
+   knob and it is about the data, not the model: set it near the segment
+   length you expect. If segments shorter than some minimum are implausible,
+   `negative_binomial_hazard(k, p)` (mean length `k / p`) puts little
+   probability on changes soon after the last one.
+2. **How much you trust the prior versus the first points of a new segment.**
+   `kappa` (for the mean) and `alpha` (for the variance) act as pseudo-counts.
+   Small values let a few points establish a new regime quickly; larger values
+   make the detector wait for more evidence. `beta` and `mu` should describe
+   the data (previous question) rather than be used as sensitivity knobs.
+3. **How you read the output.** `changepoint_probabilities(R, lag)` trades
+   delay for confidence: a larger `lag` gives a more decisive probability,
+   `lag` observations later. `get_map_changepoints(R, min_separation=k)`
+   drops starts closer than `k` points to an earlier one, for when the
+   posterior hesitates between neighboring points.
+
+Offline, the equivalent of the hazard is the segment-length prior:
+`const_prior(p=1/(T+1))` is the flat default; `geometric_prior(p=1/L)`
+encodes an expected segment length `L`; `negative_binomial_prior` allows a
+peaked length distribution, and `negative_binomial_hazard` with the same
+`k` and `p` is its online counterpart. Leave `truncate` at its default: the sum is exact
+and the legacy truncation can drop the dominant term.
+
+### My data are not normally distributed. Can I still use this? (issue #36)
+
+Every likelihood here assumes that **within a segment** the observations are
+independent draws from one distribution. The Gaussian ones detect changes in
+the mean and/or the (co)variance; `Poisson` detects changes in the rate of
+counts:
+
+| likelihood | within-segment model |
+|---|---|
+| online `StudentT`, offline `StudentT` | i.i.d. Normal, unknown mean and variance (Normal-Gamma prior) |
+| online `MultivariateT` | i.i.d. multivariate Normal, unknown mean and covariance (Normal-Wishart) |
+| offline `IndependentFeaturesLikelihood` | one Normal-Gamma model per dimension, independent |
+| offline `MultivariateT` | i.i.d. multivariate Normal, unknown mean and covariance (Normal-Wishart) |
+| online `NormalKnownVariance`, offline `NormalKnownVariance` | i.i.d. Normal with a **known** variance, unknown mean (Normal prior): mean changes only; multivariate offline input is independent dimensions |
+| online `Poisson`, offline `Poisson` | i.i.d. Poisson counts, unknown rate (Gamma prior); multivariate offline input is independent Poisson dimensions |
+| offline `FullCovarianceLikelihood` | multivariate Normal with unknown covariance and **no mean parameter** (mean zero, Xuan & Murphy 2007): it detects covariance changes; segments that differ in mean are misread as scale changes, so use `MultivariateT` when means move |
+
+When the data are not Gaussian the detector still runs, and the question is
+what the misspecification does to it:
+
+- **Heavy tails or outliers**: single extreme points look like the start of
+  a new segment. The Student-t predictive already tolerates some of this;
+  a larger `lam` or `kappa` helps, and so does a transform (log for positive,
+  right-skewed quantities such as latencies or prices).
+- **Counts**: use `online_likelihoods.Poisson` / `offline_likelihoods.Poisson`
+  (non-negative integers only). Counts that vary more than a Poisson allows
+  (overdispersion) will show extra changepoints; a square-root or Anscombe
+  transform with `StudentT` is the alternative.
+- **Bounded data**: a transform (logit for proportions) usually gets you
+  close enough.
+- **Autocorrelation or slow drift**: the model has no notion of dynamics
+  within a segment, so a drift is reported as a sequence of small changes.
+  Differencing, or modeling residuals from a trend, is the usual fix.
+- **Changes in something other than mean or variance** (e.g. in
+  autocorrelation) are not detected.
+
+In short: use it when "piecewise stationary with Gaussian-ish noise" is a
+reasonable description after a transform, and check on a segment you trust
+that the residuals look plausible.
+
+### Why is it slow on my laptop with a GPU?
+
+Device selection is automatic and prefers CUDA or Apple MPS when present, but
+the online recursion is a sequential loop over small tensors, and each step
+on an accelerator pays a launch cost. Measured on an Apple M-series laptop
+(PyTorch 2.14), CPU against MPS:
+
+| workload | CPU | MPS |
+|---|---|---|
+| online `StudentT`, 1 000 points | 0.16 s | 2.5 s |
+| online `StudentT`, 5 000 points | 1.7 s | 11 s |
+| online `MultivariateT`, 10-D, 1 000 points | 0.56 s | 17 s |
+
+The offline detector needs float64 and always runs on the CPU when MPS is
+selected. Pass `device="cpu"` to both the likelihood and the detector unless
+you have measured otherwise on your hardware; CUDA has not been benchmarked
+(issue #43).
+
+<!-- --8<-- [end:faq] -->
+
+## 🤝 Contributing
+
+Contributions are welcome. Please see the [Contributing Guidelines](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CONTRIBUTING.md)
+for the development setup, the conventions (including the rule that a test
+pinning a number says where the number comes from) and the review process.
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feat/amazing-feature`)
+3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
+4. Push to the branch (`git push origin feat/amazing-feature`)
+5. Open a Pull Request
+
+### Project documentation
+
+| Document | Contents |
+| --- | --- |
+| [CONTRIBUTING.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CONTRIBUTING.md) | Development setup, conventions, releasing |
+| [CHANGELOG.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CHANGELOG.md) | Release history, including the numerical changes in 1.1.0 |
+| [AGENTS.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/AGENTS.md) | Conventions for AI coding agents: the two `StudentT`s, index conventions, changing the math |
+| [SECURITY.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/SECURITY.md) | How to report a vulnerability |
+| [CODE_OF_CONDUCT.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CODE_OF_CONDUCT.md) | Community standards |
+| [docs/devices.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/docs/devices.md) | CPU, CUDA and MPS: device resolution, measurements, memory |
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/LICENSE) file for details.
+
+## 🔗 Related Resources
+<!-- --8<-- [start:references] -->
+
+- Ryan P. Adams and David J. C. MacKay (2007). *Bayesian Online Changepoint Detection*. arXiv:0710.3742. <https://arxiv.org/abs/0710.3742> — the online algorithm.
+- Paul Fearnhead (2006). *Exact and Efficient Bayesian Inference for Multiple Changepoint Problems*. Statistics and Computing 16(2), 203–213. <https://doi.org/10.1007/s11222-006-8450-8> — the offline algorithm.
+- Xiang Xuan and Kevin Murphy (2007). *Modeling Changing Dependency Structure in Multivariate Time Series*. ICML 2007, 1055–1062. <https://doi.org/10.1145/1273496.1273629> — the multivariate likelihoods.
+- Kevin P. Murphy (2007). *Conjugate Bayesian analysis of the Gaussian distribution*. Technical note. <https://www.cs.ubc.ca/~murphyk/Papers/bayesGauss.pdf> — the Normal-Gamma and Normal-Wishart closed forms used in the likelihoods.
+
+<!-- --8<-- [end:references] -->
+
+## 🙏 Acknowledgements
+
+- **Johannes Kulick** wrote the original NumPy implementation (2014–2022), published as `bayesian-changepoint-detection` and then `bayescd`, and owns this repository.
+- **Esteban Carisimo** did the PyTorch rewrite, the vectorized recursions, the verified likelihoods and the current maintenance.
+
+### Citation
+<!-- --8<-- [start:citation] -->
+
+If you use this library in your research, please cite it (GitHub's "Cite
+this repository" button reads [CITATION.cff](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CITATION.cff)):
 
 ```bibtex
 @software{bayesian_changepoint_detection,
-  title={Bayesian Changepoint Detection: A PyTorch Implementation},
-  author={Kulick, Johannes and Carisimo, Esteban},
-  url={https://github.com/hildensia/bayesian_changepoint_detection},
-  year={2026},
-  version={1.1.0}
+  title   = {Bayesian Changepoint Detection: A PyTorch Implementation},
+  author  = {Kulick, Johannes and Carisimo, Esteban},
+  url     = {https://github.com/hildensia/bayesian_changepoint_detection},
+  year    = {2026},
+  version = {1.1.0}
 }
 ```
 
-## Acknowledgments
+The algorithms are due to Adams & MacKay (2007) and Fearnhead (2006); please
+cite those papers as well.
 
-- Original implementation by Johannes Kulick
-- PyTorch migration and modernization by Esteban Carisimo
-- Inspired by the work of Fearnhead, Adams, MacKay, Xiang, and Murphy
+<!-- --8<-- [end:citation] -->

@@ -1,0 +1,31 @@
+# Explicit Dependabot configuration so version-update PRs are predictable.
+# The library depends only on torch; numpy/scipy and the tooling live in
+# extras, and there is no lock file, so the "pip" entry mostly keeps the
+# lower bounds in pyproject.toml honest. open-pull-requests-limit is per
+# ecosystem and counts version updates only (security updates are not
+# limited by it): every Actions update lands in one grouped PR, so one open
+# PR is enough there; pip may have up to five.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # pyproject.toml declares lower bounds only. The default strategy
+    # proposes raising them to the latest release (#62-#66), which shrinks
+    # the supported range for nothing; only propose a change when a
+    # requirement actually excludes a new version.
+    versioning-strategy: increase-if-necessary
+    groups:
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]

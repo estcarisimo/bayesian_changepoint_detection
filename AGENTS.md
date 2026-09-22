@@ -8,16 +8,28 @@ useful too. Conventions follow <https://agents.md>.
 A PyTorch implementation of two Bayesian changepoint detection algorithms:
 
 - **Offline** (`offline_changepoint_detection`): Fearnhead (2006), posterior
-  over changepoint locations via dynamic programming over segments. Exact
-  only without truncation; the default `truncate=-40` drops terms whose
-  log contribution falls that far below the running sum, so the returned
-  posterior is a (very close) truncated approximation.
+  over changepoint locations via dynamic programming over segments. Exact:
+  the sum over segment ends is evaluated in full. The `truncate` argument
+  (default `-inf`) only exists to reproduce the truncated results of
+  versions up to 1.1.0; that rule could discard the dominant term (see
+  the docstring) and saved no work once the recursion was vectorized.
 - **Online** (`online_changepoint_detection`): Adams & MacKay (2007), a
   recursively updated posterior over *run length* (time since the last
   changepoint).
 
 It is a small research library. Prefer clarity and numerical correctness over
 cleverness, and keep the public API stable.
+
+## Language
+
+Write this file, all other agent instructions, every identifier
+(function, method, class, argument, test marker) and docstrings in American
+English:
+`initialize`, `normalize`, `behavior`, `color`, `neighbor`, `modeling`.
+The rule is mandatory. Renaming a public identifier to comply needs a
+deprecation path (keep the old name as an alias that warns, note it in
+`CHANGELOG.md`); an audit on 2026-09-22 found no public name that needed
+it, and renamed the test marker `behaviour` to `behavior`.
 
 ## Setup and tests
 
@@ -26,8 +38,18 @@ pip install -e ".[dev]"
 pytest
 ```
 
-No linter runs in CI, though `pyproject.toml` carries black, isort and mypy
-settings. Tests must pass without a GPU.
+CI lints with ruff (`ruff check` and `ruff format --check`, config in
+`pyproject.toml`); run both before pushing, or `pre-commit install` once.
+Tests must pass without a GPU.
+
+Every test is marked `math` (checked against an independent computation
+of the same quantity: scipy, an exhaustive enumeration, a closed form from
+a paper, a derivation sharing no code with the one under test) or
+`behavior` (pins current behavior: contracts, edge cases, devices, one
+formula through two code paths, synthetic-data detection, goldens from an
+earlier version); `tests/conftest.py` rejects a test with neither or both. `pytest -m math`
+runs only the proofs, which is the set to watch when changing the
+mathematics (see "Changing the math").
 
 Two things that surprise people:
 
@@ -46,6 +68,8 @@ Two things that surprise people:
 | Path | Contents |
 | --- | --- |
 | `bayesian_changepoint_detection/bayesian_models.py` | Both detection algorithms |
+| `bayesian_changepoint_detection/segments.py` | `segment_statistics`: per-segment summaries and the direction of each change |
+| `bayesian_changepoint_detection/streaming.py` | `OnlineChangepointDetector`, the online recursion one observation at a time |
 | `bayesian_changepoint_detection/offline_likelihoods.py` | Segment likelihoods for the offline algorithm |
 | `bayesian_changepoint_detection/online_likelihoods.py` | Predictive likelihoods for the online algorithm |
 | `bayesian_changepoint_detection/priors.py` | Segment-length priors (offline) |
@@ -54,12 +78,13 @@ Two things that surprise people:
 | `bayesian_changepoint_detection/generate_data.py` | Synthetic series for tests and examples |
 | `tests/` | Test suite |
 | `examples/` | Runnable scripts and notebooks |
+| `docs/`, `mkdocs.yml` | Documentation site; most pages include `README.md` sections through `<!-- --8<-- [start:name] -->` markers, so keep those markers intact |
 
 ## Things that are easy to get wrong
 
-**There are two different classes named `BaseLikelihood`, and two named
-`StudentT`.** One pair is in `offline_likelihoods`, the other in
-`online_likelihoods`. They are unrelated and their interfaces are
+**There are two different classes each named `BaseLikelihood`, `StudentT`,
+`MultivariateT`, `Poisson` and `NormalKnownVariance`.** One of each is in `offline_likelihoods`,
+the other in `online_likelihoods`. They are unrelated and their interfaces are
 incompatible. Always import them module-qualified
 (`offline_likelihoods.StudentT`), never bare into a shared namespace.
 
@@ -74,32 +99,53 @@ incompatible. Always import them module-qualified
   predictive densities, one per possible run length. `update_theta(data)` then
   advances the model's internal parameter set.
 
+**The online detector's second return value is the MAP run length, not a
+probability.** `R[0, t]` (run length 0) equals the hazard under a constant
+hazard and cannot detect anything; a change at `t` appears as mass at run
+length `k` in column `t + k`. Use `get_map_changepoints(R)` or
+`changepoint_probabilities(R, lag)`; never threshold `R[0, :]`. Versions
+1.0.x returned un-normalized `R[0, t]` as `changepoint_probs`; that output
+is removed in the next release (see the Unreleased section of `CHANGELOG.md`).
+
 **Online likelihood objects are stateful and single-use.** `update_theta`
 grows the parameter vectors by one entry per timestep and `pdf` increments an
 internal counter. Re-instantiate the model before a second run; do not reuse
-one across two calls to `online_changepoint_detection`.
+one across two calls to `online_changepoint_detection`. A likelihood that
+lists its per-run-length tensors in `_run_length_state` can be pruned
+(`prune(n)`), which `OnlineChangepointDetector(max_run_length=...)` needs;
+a new online likelihood should declare it.
 
 **Log space vs. probability space differs by algorithm.** Priors return log
 probabilities and both likelihood families return log densities. The
 *offline* recursion stays in log space throughout (`logaddexp` /
 `logsumexp`). `online_changepoint_detection` does not: it exponentiates
-the predictive densities and updates `R` and `changepoint_probs` as
-ordinary probabilities with multiplication and sums, renormalizing each
-column after recording `changepoint_probs`. (`viterbi_changepoints`, by
-contrast, keeps its `log_probs` table in log space.) Check which
+the predictive densities and updates `R` as ordinary probabilities with
+multiplication and sums, renormalizing each column. (`viterbi_changepoints`, by
+contrast, keeps its score table `V` in log space and takes a max where the
+forward pass sums.) Check which
 convention a function uses before editing it.
 
-**Hazard functions return probabilities, and the API does not enforce the
-range.** `constant_hazard(lam, r)` returns `1 / lam` for any positive `lam`,
-so `lam < 1` silently yields a "probability" above 1. Callers must pass
-`lam >= 1`; if you touch this function, add validation rather than relying
-on the docstring.
+**Hazard functions return probabilities.** `constant_hazard(lam, r)` returns
+`1 / lam` and raises `ValueError` for `lam < 1` or NaN (up to 1.1.0 it
+accepted any positive `lam`, so `0 < lam < 1` silently gave a "probability"
+above 1). A new hazard function must validate its output range the same
+way rather than rely on the docstring.
 
 **Numerical precision is load-bearing.** The offline recursion accumulates
 across O(n²) terms. Do not silently downcast. Before #50 the offline
 recursion ran in float32; with #50 it runs in float64 and, because MPS does
 not support float64, falls back to CPU there. Any new float64 path needs
-the same fallback.
+the same fallback. Offline prefix sums are taken on data minus its mean
+(`_CumsumLikelihood._shift`) and a model that needs the raw location adds
+the shift back as `mean + (shift - mu0)`; rank-one terms in determinants go
+through `_logdet_plus_rank_one`. `tests/test_offline_large_offsets.py`
+checks every offline likelihood against exact rational arithmetic at
+offsets up to 1e10; a new offline likelihood belongs there too. The online
+state is float32 by design (it runs on MPS); the translation-equivariant
+online likelihoods keep means relative to the first observation (`_mu_c`,
+`_shift`, subtraction in float64 where the device has it) and expose the
+absolute mean as the read-only `mu` property. A new online likelihood with
+a location parameter should do the same (`tests/test_online_large_offsets.py`).
 
 **Device handling.** Use `device.get_device()` and `device.ensure_tensor()`
 rather than calling `torch.device` or `.to()` ad hoc. A function that accepts
@@ -160,8 +206,13 @@ and after, and put the numbers in the PR.
   detection*. arXiv:0710.3742.
 - Xuan, X., & Murphy, K. (2007). *Modeling changing dependency structure in
   multivariate time series*. ICML. (Multivariate offline likelihoods.)
+- Gelman, A., Carlin, J. B., Stern, H. S., Dunson, D. B., Vehtari, A., &
+  Rubin, D. B. (2013). *Bayesian Data Analysis*, 3rd ed., section 2.6.
+  (Gamma-Poisson conjugacy and the negative-binomial predictive, for both
+  `Poisson` classes.)
 - Murphy, K. (2007). *Conjugate Bayesian analysis of the Gaussian
-  distribution*. (Normal-Gamma updates for the univariate `StudentT`
+  distribution*. (Normal-Normal updates for both `NormalKnownVariance`
+  classes; Normal-Gamma updates for the univariate `StudentT`
   likelihoods and, per dimension, for `IndependentFeaturesLikelihood`;
   `FullCovarianceLikelihood` and both `MultivariateT` classes use
   Normal-Wishart conjugacy, see Xuan & Murphy above and the docstrings.)

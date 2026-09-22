@@ -34,7 +34,9 @@ _V0_FLOOR = 1e-8  # floor on the data-derived prior variance
 def _multigammaln(a: torch.Tensor, p: int) -> torch.Tensor:
     """Log of the multivariate gamma function, vectorized over ``a``."""
     j = torch.arange(p, device=a.device, dtype=a.dtype)
-    return (p * (p - 1) / 4.0) * _LOG_PI + torch.lgamma(a.unsqueeze(-1) - j / 2.0).sum(-1)
+    return (p * (p - 1) / 4.0) * _LOG_PI + torch.lgamma(a.unsqueeze(-1) - j / 2.0).sum(
+        -1
+    )
 
 
 class BaseLikelihood(ABC):
@@ -59,7 +61,7 @@ class BaseLikelihood(ABC):
     def __init__(
         self,
         device: Optional[Union[str, torch.device]] = None,
-        cache_enabled: bool = True
+        cache_enabled: bool = True,
     ):
         self.device = get_device(device)
         self.cache_enabled = cache_enabled
@@ -131,8 +133,12 @@ class BaseLikelihood(ABC):
             data = data.unsqueeze(1)
         return data
 
-    def _compute_stats(self, data: torch.Tensor) -> None:
-        """Compute per-dataset sufficient statistics. Default: none."""
+    def _compute_stats(self, data: torch.Tensor) -> None:  # noqa: B027
+        """Compute per-dataset sufficient statistics. Default: none.
+
+        Not abstract on purpose: likelihoods without precomputed statistics
+        (e.g. third-party ones that only implement ``pdf``) need no override.
+        """
 
     @abstractmethod
     def pdf(self, data: torch.Tensor, t: int, s: int) -> float:
@@ -170,23 +176,103 @@ class BaseLikelihood(ABC):
 
 
 class _CumsumLikelihood(BaseLikelihood):
-    """Shared machinery: cumulative first and second moments per dimension."""
+    """Shared machinery: cumulative first and second moments per dimension.
+
+    The prefix sums are taken on the data minus ``self._shift``, its mean per
+    dimension, so that within-segment scatter is not lost to cancellation
+    when the data sit far from zero (issue #55: tens of nats at an offset of
+    1e8). Subclasses add the shift back where the model needs the raw
+    location (``mean + (shift - mu0)``). A subclass whose statistics must be
+    raw sums (``Poisson``) sets ``_centered = False``.
+    """
+
+    _centered = True
 
     def _compute_stats(self, data: torch.Tensor) -> None:
         n, d = data.shape
+        if self._centered:
+            self._shift = data.mean(dim=0)  # [d]
+        else:
+            self._shift = torch.zeros(d, dtype=data.dtype, device=data.device)
+        y = data - self._shift
         zero = torch.zeros(1, d, dtype=data.dtype, device=data.device)
-        # S1[k] = sum of data[:k], S2[k] = sum of data[:k]**2  (shape [n+1, d])
-        self._S1 = torch.cat([zero, torch.cumsum(data, dim=0)])
-        self._S2 = torch.cat([zero, torch.cumsum(data ** 2, dim=0)])
+        # S1[k] = sum of y[:k], S2[k] = sum of y[:k]**2  (shape [n+1, d])
+        self._S1 = torch.cat([zero, torch.cumsum(y, dim=0)])
+        self._S2 = torch.cat([zero, torch.cumsum(y**2, dim=0)])
 
     def _segment_moments(self, t: int, s_hi: int):
-        """Lengths, first and second moments of data[t:s] for s = t+1 .. s_hi."""
-        sum_x = self._S1[t + 1:s_hi + 1] - self._S1[t]
-        sum_x2 = self._S2[t + 1:s_hi + 1] - self._S2[t]
-        lengths = torch.arange(
-            1, s_hi - t + 1, dtype=sum_x.dtype, device=sum_x.device
-        )
+        """Lengths, first and second moments of (data - shift)[t:s] for
+        s = t+1 .. s_hi."""
+        sum_x = self._S1[t + 1 : s_hi + 1] - self._S1[t]
+        sum_x2 = self._S2[t + 1 : s_hi + 1] - self._S2[t]
+        lengths = torch.arange(1, s_hi - t + 1, dtype=sum_x.dtype, device=sum_x.device)
         return lengths, sum_x, sum_x2
+
+    def _flat_variance(
+        self, lengths: torch.Tensor, sum_x: torch.Tensor, sum_x2: torch.Tensor
+    ) -> torch.Tensor:
+        """Population variance of all ``n * d`` entries of each segment.
+
+        Within-dimension scatter plus the spread of the per-dimension means,
+        both from centered sums, so neither cancels far from zero. Returns
+        ``[m]``.
+        """
+        n = lengths.unsqueeze(-1)  # [m, 1]
+        mean = sum_x / n  # [m, d], minus the shift
+        within = torch.clamp(sum_x2 - sum_x * mean, min=0.0).sum(dim=-1)
+        # Per-dimension means relative to the average shift; their spread
+        # is what the flattened variance adds on top of the within part.
+        dim_means = mean + (self._shift - self._shift.mean())
+        spread = ((dim_means - dim_means.mean(dim=-1, keepdim=True)) ** 2).sum(-1)
+        return (within + lengths * spread) / (lengths * sum_x.shape[1])
+
+    @staticmethod
+    def _logdet_plus_rank_one(
+        prior: torch.Tensor,
+        scatter: torch.Tensor,
+        weight: torch.Tensor,
+        vector: torch.Tensor,
+    ) -> torch.Tensor:
+        """``log det(prior + scatter + weight * v v^T)``, ``[m, d, d]`` inputs.
+
+        ``prior`` is SPD and ``scatter`` PSD in exact arithmetic. Matrix
+        determinant lemma: ``log det(B) + log1p(weight * v^T B^{-1} v)`` with
+        ``B = prior + scatter``; forming the full sum first would cancel when
+        the rank-one term dwarfs ``B`` (data far from the prior mean).
+
+        A scatter computed from sums can come out slightly indefinite when a
+        segment is far from the global shift (e.g. a constant regime at 1e8
+        next to one at 0). For the segments where the Cholesky factorization
+        of ``B`` then fails, the scatter is projected onto the PSD cone
+        (negative eigenvalues set to 0) before retrying.
+        """
+        base = prior + scatter
+        L, info = torch.linalg.cholesky_ex(base)
+        if bool((info != 0).any()):
+            failed = info != 0
+            eigenvalues, eigenvectors = torch.linalg.eigh(scatter[failed])
+            psd = (eigenvectors * eigenvalues.clamp(min=0.0).unsqueeze(-2)) @ (
+                eigenvectors.transpose(-1, -2)
+            )
+            base = base.clone()
+            base[failed] = prior.expand_as(base)[failed] + psd
+            L, info = torch.linalg.cholesky_ex(base)
+        logdet_base = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(-1)
+        z = torch.linalg.solve_triangular(L, vector.unsqueeze(-1), upper=False)
+        quadratic = (z.squeeze(-1) ** 2).sum(-1)
+        logdet = logdet_base + torch.log1p(weight * quadratic)
+        if bool((info != 0).any()):
+            # Still not positive definite (a scatter of condition ~1e16, e.g.
+            # identical dimensions far from the shift): fall back to the
+            # direct log-determinant, as before the lemma was used.
+            still = info != 0
+            full = (
+                prior.expand_as(base)
+                + scatter
+                + weight.reshape(-1, 1, 1) * torch.einsum("mi,mj->mij", vector, vector)
+            )
+            logdet = torch.where(still, torch.linalg.slogdet(full)[1], logdet)
+        return logdet
 
 
 class StudentT(_CumsumLikelihood):
@@ -260,16 +346,16 @@ class StudentT(_CumsumLikelihood):
         lengths: [m], sum_x/sum_x2: [m, d]  ->  returns [m].
         """
         n = lengths.unsqueeze(-1)  # [m, 1]
-        mean = sum_x / n
+        mean = sum_x / n  # segment mean minus the shift
         # sum of squared deviations; clamp guards tiny negative rounding error
-        ss = torch.clamp(sum_x2 - sum_x ** 2 / n, min=0.0)
+        ss = torch.clamp(sum_x2 - sum_x**2 / n, min=0.0)
+        # (shift - mu0) first: exact when both are large and close.
+        deviation = mean + (self._shift - self.mu0)
 
         kappa_n = self.kappa0 + n
         alpha_n = self.alpha0 + n / 2.0
         beta_n = (
-            self.beta0
-            + 0.5 * ss
-            + self.kappa0 * n * (mean - self.mu0) ** 2 / (2.0 * kappa_n)
+            self.beta0 + 0.5 * ss + self.kappa0 * n * deviation**2 / (2.0 * kappa_n)
         )
 
         log_marginal = (
@@ -347,17 +433,19 @@ class IndependentFeaturesLikelihood(_CumsumLikelihood):
         # Weakest proper prior: N0 = d, V0 = variance of the flattened segment
         # (population variance over all n*d entries), exactly as in the
         # original implementation.
-        total = sum_x.sum(dim=1)
-        total_sq = sum_x2.sum(dim=1)
-        count = n * d
-        v0 = total_sq / count - (total / count) ** 2  # [m]
+        v0 = self._flat_variance(lengths, sum_x, sum_x2)  # [m]
         # A length-one univariate segment (or any constant segment) has zero
-        # variance, and rounding can make it slightly negative; without a
-        # floor, log(v0) is -inf/nan and poisons Q. Same floor as before.
+        # variance; without a floor, log(v0) is -inf and poisons Q. Same
+        # floor as before.
         v0 = torch.clamp(v0, min=_V0_FLOOR)
 
         n0 = float(d)
-        vn = v0.unsqueeze(-1) + sum_x2  # [m, d]
+        # The model uses raw second moments sum(x_j^2) = scatter_j + n xbar_j^2,
+        # rebuilt from centered sums as a sum of non-negative terms.
+        mean = sum_x / n.unsqueeze(-1)
+        scatter = torch.clamp(sum_x2 - sum_x * mean, min=0.0)
+        raw_sq = scatter + n.unsqueeze(-1) * (mean + self._shift) ** 2
+        vn = v0.unsqueeze(-1) + raw_sq  # [m, d]
 
         return d * (
             -(n / 2.0) * _LOG_PI
@@ -424,9 +512,10 @@ class FullCovarianceLikelihood(_CumsumLikelihood):
     def _compute_stats(self, data: torch.Tensor) -> None:
         super()._compute_stats(data)
         n, d = data.shape
-        outer = torch.einsum("ni,nj->nij", data, data)
+        y = data - self._shift
+        outer = torch.einsum("ni,nj->nij", y, y)
         zero = torch.zeros(1, d, d, dtype=data.dtype, device=data.device)
-        # C[k] = sum of outer products of data[:k]  (shape [n+1, d, d])
+        # C[k] = sum of outer products of y[:k]  (shape [n+1, d, d])
         self._C = torch.cat([zero, torch.cumsum(outer, dim=0)])
 
     def _log_marginal(
@@ -439,21 +528,25 @@ class FullCovarianceLikelihood(_CumsumLikelihood):
         m, d = sum_x.shape
         n = lengths
         # Weakest proper prior: N0 = d, V0 = var(flattened segment) * I.
-        total = sum_x.sum(dim=1)
-        total_sq = sum_x2.sum(dim=1)
-        count = n * d
-        v0 = total_sq / count - (total / count) ** 2  # [m]
+        v0 = self._flat_variance(lengths, sum_x, sum_x2)  # [m]
         # A length-one univariate segment (or any constant segment) has zero
-        # variance, and rounding can make it slightly negative; without a
-        # floor, log(v0) is -inf/nan and poisons Q. Same floor as before.
+        # variance; without a floor, log(v0) is -inf and poisons Q. Same
+        # floor as before.
         v0 = torch.clamp(v0, min=_V0_FLOOR)
 
         n0 = float(d)
         eye = torch.eye(d, dtype=sum_x.dtype, device=sum_x.device)
-        vn = v0.unsqueeze(-1).unsqueeze(-1) * eye + sum_outer  # [m, d, d]
+        # V_n = V0 + sum(x x^T) = (v0 I + S) + n xbar xbar^T with S the scatter
+        # around the segment mean; the rank-one part goes through the
+        # determinant lemma so it cannot swamp S far from zero.
+        mean = sum_x / n.unsqueeze(-1)  # minus the shift
+        scatter = sum_outer - n.unsqueeze(-1).unsqueeze(-1) * torch.einsum(
+            "mi,mj->mij", mean, mean
+        )
+        prior = v0.unsqueeze(-1).unsqueeze(-1) * eye  # [m, d, d]
 
         logdet_v0 = d * torch.log(v0)
-        logdet_vn = torch.linalg.slogdet(vn)[1]
+        logdet_vn = self._logdet_plus_rank_one(prior, scatter, n, mean + self._shift)
 
         mg0 = _multigammaln(torch.full_like(n, n0 / 2.0), d)
         mgn = _multigammaln((n0 + n) / 2.0, d)
@@ -470,7 +563,7 @@ class FullCovarianceLikelihood(_CumsumLikelihood):
         data = self.setup(data)
         n = data.shape[0]
         lengths, sum_x, sum_x2 = self._segment_moments(t, n)
-        sum_outer = self._C[t + 1:n + 1] - self._C[t]
+        sum_outer = self._C[t + 1 : n + 1] - self._C[t]
         return self._log_marginal(lengths, sum_x, sum_x2, sum_outer)
 
     def pdf(self, data: torch.Tensor, t: int, s: int) -> float:
@@ -496,7 +589,7 @@ class FullCovarianceLikelihood(_CumsumLikelihood):
             return 0.0
         data = self.setup(data)
         lengths, sum_x, sum_x2 = self._segment_moments(t, s)
-        sum_outer = (self._C[s:s + 1] - self._C[t])
+        sum_outer = self._C[s : s + 1] - self._C[t]
         return self._log_marginal(
             lengths[-1:], sum_x[-1:], sum_x2[-1:], sum_outer
         ).item()
@@ -513,7 +606,8 @@ class MultivariateT(_CumsumLikelihood):
     Parameters
     ----------
     dims : int, optional
-        Number of dimensions. If None, inferred from data.
+        Number of dimensions. If None, taken from the data on every call;
+        if given, data with a different dimension raises ``ValueError``.
     dof0 : float, optional
         Prior degrees of freedom (default: dims + 1).
     kappa0 : float, optional
@@ -521,7 +615,11 @@ class MultivariateT(_CumsumLikelihood):
     mu0 : torch.Tensor, optional
         Prior mean vector (default: zero vector).
     Psi0 : torch.Tensor, optional
-        Prior scale matrix (default: identity matrix).
+        Scale matrix of the prior on the *covariance* side (the inverse of
+        the Wishart scale ``W`` used by the online ``MultivariateT``):
+        ``Psi0 = dof0 * C`` encodes a prior covariance ``C``. Default
+        ``dof0 * I``, i.e. unit prior covariance, matching the online class.
+        Versions up to 1.1.0 used ``I``, which is ``dof0`` times tighter.
     device : str, torch.device, or None, optional
         Device to place tensors on.
     cache_enabled : bool, optional
@@ -543,7 +641,7 @@ class MultivariateT(_CumsumLikelihood):
         mu0: Optional[torch.Tensor] = None,
         Psi0: Optional[torch.Tensor] = None,
         device: Optional[Union[str, torch.device]] = None,
-        cache_enabled: bool = True
+        cache_enabled: bool = True,
     ):
         super().__init__(device, cache_enabled)
         self.dims = dims
@@ -554,15 +652,22 @@ class MultivariateT(_CumsumLikelihood):
 
     def _resolved_params(self, data: torch.Tensor):
         d = data.shape[1]
-        if self.dims is None:
-            self.dims = d
+        # dims=None means "take it from the data", on every call: the model
+        # can be reused on series of different dimension. An explicit dims
+        # that disagrees with the data is an error, not silently overridden.
+        if self.dims is not None and d != self.dims:
+            raise ValueError(
+                f"MultivariateT(dims={self.dims}) got observations of "
+                f"dimension {d} (data shape {list(data.shape)})"
+            )
         dof0 = self.dof0 if self.dof0 is not None else d + 1
         if self.mu0 is None:
             mu0 = torch.zeros(d, dtype=data.dtype, device=data.device)
         else:
             mu0 = ensure_tensor(self.mu0, device=data.device).to(data.dtype)
         if self.Psi0 is None:
-            psi0 = torch.eye(d, dtype=data.dtype, device=data.device)
+            # Unit prior covariance: E[precision] = dof0 * Psi0^{-1} = I.
+            psi0 = dof0 * torch.eye(d, dtype=data.dtype, device=data.device)
         else:
             psi0 = ensure_tensor(self.Psi0, device=data.device).to(data.dtype)
         return dof0, mu0, psi0
@@ -570,7 +675,8 @@ class MultivariateT(_CumsumLikelihood):
     def _compute_stats(self, data: torch.Tensor) -> None:
         super()._compute_stats(data)
         n, d = data.shape
-        outer = torch.einsum("ni,nj->nij", data, data)
+        y = data - self._shift
+        outer = torch.einsum("ni,nj->nij", y, y)
         zero = torch.zeros(1, d, d, dtype=data.dtype, device=data.device)
         self._C = torch.cat([zero, torch.cumsum(outer, dim=0)])
 
@@ -585,25 +691,24 @@ class MultivariateT(_CumsumLikelihood):
         dof0, mu0, psi0 = self._resolved_params(data)
         n = lengths
 
-        mean = sum_x / n.unsqueeze(-1)  # [m, d]
-        # Scatter matrix around the segment mean:
-        # S = sum(x x^T) - n * mean mean^T
+        mean = sum_x / n.unsqueeze(-1)  # [m, d], minus the shift
+        # Scatter matrix around the segment mean (centered sums, so it does
+        # not cancel far from zero): S = sum(y y^T) - n * mean mean^T
         scatter = sum_outer - n.unsqueeze(-1).unsqueeze(-1) * torch.einsum(
             "mi,mj->mij", mean, mean
         )
 
         kappa_n = self.kappa0 + n
         dof_n = dof0 + n
-        diff = mean - mu0
-        psi_n = (
-            psi0
-            + scatter
-            + (self.kappa0 * n / kappa_n).unsqueeze(-1).unsqueeze(-1)
-            * torch.einsum("mi,mj->mij", diff, diff)
-        )
-
+        # (shift - mu0) first: exact when both are large and close.
+        diff = mean + (self._shift - mu0)
+        # Psi_n = Psi0 + S + (kappa0 n / kappa_n) diff diff^T; the rank-one
+        # part goes through the determinant lemma so that a prior mean far
+        # from the data cannot swamp Psi0 + S.
         logdet_psi0 = torch.linalg.slogdet(psi0)[1]
-        logdet_psi_n = torch.linalg.slogdet(psi_n)[1]
+        logdet_psi_n = self._logdet_plus_rank_one(
+            psi0.expand_as(scatter), scatter, self.kappa0 * n / kappa_n, diff
+        )
 
         return (
             _multigammaln(dof_n / 2.0, d)
@@ -618,7 +723,7 @@ class MultivariateT(_CumsumLikelihood):
         data = self.setup(data)
         n = data.shape[0]
         lengths, sum_x, _ = self._segment_moments(t, n)
-        sum_outer = self._C[t + 1:n + 1] - self._C[t]
+        sum_outer = self._C[t + 1 : n + 1] - self._C[t]
         return self._log_marginal(data, lengths, sum_x, sum_outer)
 
     def pdf(self, data: torch.Tensor, t: int, s: int) -> float:
@@ -644,7 +749,233 @@ class MultivariateT(_CumsumLikelihood):
             return 0.0
         data = self.setup(data)
         lengths, sum_x, _ = self._segment_moments(t, s)
-        sum_outer = self._C[s:s + 1] - self._C[t]
-        return self._log_marginal(
-            data, lengths[-1:], sum_x[-1:], sum_outer
-        ).item()
+        sum_outer = self._C[s : s + 1] - self._C[t]
+        return self._log_marginal(data, lengths[-1:], sum_x[-1:], sum_outer).item()
+
+
+def _check_counts(data: torch.Tensor) -> None:
+    """Raise unless every entry is a non-negative integer (a count)."""
+    if bool((data < 0).any()) or bool((data != torch.round(data)).any()):
+        raise ValueError("Poisson likelihood needs non-negative integer counts")
+
+
+class Poisson(_CumsumLikelihood):
+    """
+    Poisson (Gamma-Poisson) marginal likelihood for offline detection of
+    changes in the rate of count data.
+
+    Each segment's counts are i.i.d. Poisson with an unknown rate ``lambda``
+    under a conjugate ``Gamma(alpha0, beta0)`` prior (shape, rate). The
+    marginal likelihood of a segment of ``n`` counts with sum ``S`` is, in
+    closed form (Gelman et al., *Bayesian Data Analysis*, 3rd ed., section
+    2.6, Poisson model with gamma prior):
+
+    ``log p = lgamma(alpha0 + S) - lgamma(alpha0) + alpha0 log(beta0)
+    - (alpha0 + S) log(beta0 + n) - sum_i lgamma(x_i + 1)``.
+
+    Multivariate input is treated as independent Poisson dimensions, as
+    ``StudentT`` does, and their log marginals are summed.
+
+    Parameters
+    ----------
+    device : str, torch.device, or None, optional
+        Device to place tensors on.
+    cache_enabled : bool, optional
+        Retained for backward compatibility (see ``BaseLikelihood``).
+    alpha0 : float, optional
+        Shape of the Gamma prior on the rate (default 1.0).
+    beta0 : float, optional
+        Rate of the Gamma prior on the rate (default 1.0). The prior mean
+        rate is ``alpha0 / beta0``; a small ``beta0`` makes the prior vague.
+
+    Raises
+    ------
+    ValueError
+        If the data contain negative or non-integer values.
+
+    Examples
+    --------
+    >>> import torch
+    >>> likelihood = Poisson(alpha0=1.0, beta0=0.1)
+    >>> counts = torch.poisson(torch.full((100,), 4.0))
+    >>> log_marginal = likelihood.pdf(counts, 10, 50)
+    """
+
+    # The marginal needs the raw count total of each segment.
+    _centered = False
+
+    def __init__(
+        self,
+        device: Optional[Union[str, torch.device]] = None,
+        cache_enabled: bool = True,
+        *,
+        alpha0: float = 1.0,
+        beta0: float = 1.0,
+    ):
+        if not (alpha0 > 0 and beta0 > 0):
+            raise ValueError(
+                f"alpha0 and beta0 must be positive, got {alpha0} and {beta0}"
+            )
+        super().__init__(device, cache_enabled)
+        self.alpha0 = alpha0
+        self.beta0 = beta0
+
+    def _compute_stats(self, data: torch.Tensor) -> None:
+        _check_counts(data)
+        super()._compute_stats(data)
+        zero = torch.zeros(1, data.shape[1], dtype=data.dtype, device=data.device)
+        # L[k] = sum of lgamma(x + 1) = log(x!) over data[:k]
+        self._L = torch.cat([zero, torch.cumsum(torch.lgamma(data + 1), dim=0)])
+
+    def _log_marginal(self, t: int, s_hi: int) -> torch.Tensor:
+        lengths, sum_x, _ = self._segment_moments(t, s_hi)
+        log_factorials = self._L[t + 1 : s_hi + 1] - self._L[t]
+        alpha_n = self.alpha0 + sum_x  # [m, d]
+        beta_n = self.beta0 + lengths.unsqueeze(-1)  # [m, 1]
+        log_marginal = (
+            torch.lgamma(alpha_n)
+            - math.lgamma(self.alpha0)
+            + self.alpha0 * math.log(self.beta0)
+            - alpha_n * torch.log(beta_n)
+            - log_factorials
+        )
+        return log_marginal.sum(dim=-1)
+
+    def pdf_rows(self, data: torch.Tensor, t: int) -> torch.Tensor:
+        data = self.setup(data)
+        return self._log_marginal(t, data.shape[0])
+
+    def pdf(self, data: torch.Tensor, t: int, s: int) -> float:
+        """
+        Log marginal likelihood of the counts ``data[t:s]``.
+
+        Parameters
+        ----------
+        data : torch.Tensor
+            Complete series of counts.
+        t : int
+            Start index (inclusive).
+        s : int
+            End index (exclusive).
+
+        Returns
+        -------
+        float
+            Log marginal likelihood of the segment.
+        """
+        if s <= t:
+            return 0.0
+        data = self.setup(data)
+        return self._log_marginal(t, s)[-1].item()
+
+
+class NormalKnownVariance(_CumsumLikelihood):
+    """
+    Normal likelihood with known variance and a conjugate Normal prior on the
+    mean, for offline detection of changes in the mean when the noise level
+    is known.
+
+    Within a segment ``x_i ~ N(mu, variance)`` i.i.d. with
+    ``mu ~ N(mu0, prior_variance)``. Integrating ``mu`` out, the ``n`` values
+    of a segment are jointly Normal with mean ``mu0`` and covariance
+    ``variance I + prior_variance 1 1^T`` (Murphy, "Conjugate Bayesian
+    analysis of the Gaussian distribution", 2007, section 2), so with
+    ``d_i = x_i - mu0`` and ``c = variance + n prior_variance``:
+
+    ``log p = -n/2 log(2 pi) - (n-1)/2 log(variance) - 1/2 log(c)
+    - (sum d_i^2 - prior_variance (sum d_i)^2 / c) / (2 variance)``.
+
+    Multivariate input is treated as independent dimensions sharing the same
+    hyperparameters, and their log marginals are summed.
+
+    Parameters
+    ----------
+    device : str, torch.device, or None, optional
+        Device to place tensors on.
+    cache_enabled : bool, optional
+        Retained for backward compatibility (see ``BaseLikelihood``).
+    variance : float, optional
+        The known observation variance (default 1.0). Only changes in the
+        mean are modeled; if the true variance differs, variance changes and
+        misfit show up as mean changes.
+    mu0 : float, optional
+        Prior mean of the segment mean (default 0.0).
+    prior_variance : float, optional
+        Prior variance of the segment mean (default 1.0). Make it large
+        compared with the spread of segment means you expect.
+
+    Examples
+    --------
+    >>> import torch
+    >>> likelihood = NormalKnownVariance(variance=0.25, prior_variance=100.0)
+    >>> data = torch.cat([torch.randn(50) * 0.5, torch.randn(50) * 0.5 + 2])
+    >>> log_marginal = likelihood.pdf(data, 0, 50)
+    """
+
+    def __init__(
+        self,
+        device: Optional[Union[str, torch.device]] = None,
+        cache_enabled: bool = True,
+        *,
+        variance: float = 1.0,
+        mu0: float = 0.0,
+        prior_variance: float = 1.0,
+    ):
+        if not (variance > 0 and prior_variance > 0):
+            raise ValueError(
+                "variance and prior_variance must be positive, got "
+                f"{variance} and {prior_variance}"
+            )
+        super().__init__(device, cache_enabled)
+        self.variance = variance
+        self.mu0 = mu0
+        self.prior_variance = prior_variance
+
+    def _log_marginal(self, t: int, s_hi: int) -> torch.Tensor:
+        # Centered sums; the shift cancels in the scatter and is added back
+        # to the segment mean.
+        lengths, sum_x, sum_x2 = self._segment_moments(t, s_hi)
+        n = lengths.unsqueeze(-1)  # [m, 1]
+        mean = sum_x / n  # segment mean minus the shift
+        scatter = torch.clamp(sum_x2 - sum_x * mean, min=0.0)
+        c = self.variance + n * self.prior_variance
+        # sum (x - mu0)^2 - prior_variance (sum (x - mu0))^2 / c
+        #   = scatter + n (mean - mu0)^2 variance / c, so
+        # (shift - mu0) first: exact when both are large and close, where
+        # (mean + shift) would round to the grid of the large value.
+        deviation = mean + (self._shift - self.mu0)
+        quadratic = scatter / self.variance + n * deviation**2 / c
+        log_marginal = (
+            -0.5 * n * _LOG_2PI
+            - 0.5 * (n - 1) * math.log(self.variance)
+            - 0.5 * torch.log(c)
+            - 0.5 * quadratic
+        )
+        return log_marginal.sum(dim=-1)
+
+    def pdf_rows(self, data: torch.Tensor, t: int) -> torch.Tensor:
+        data = self.setup(data)
+        return self._log_marginal(t, data.shape[0])
+
+    def pdf(self, data: torch.Tensor, t: int, s: int) -> float:
+        """
+        Log marginal likelihood of ``data[t:s]``.
+
+        Parameters
+        ----------
+        data : torch.Tensor
+            Complete time series.
+        t : int
+            Start index (inclusive).
+        s : int
+            End index (exclusive).
+
+        Returns
+        -------
+        float
+            Log marginal likelihood of the segment.
+        """
+        if s <= t:
+            return 0.0
+        data = self.setup(data)
+        return self._log_marginal(t, s)[-1].item()
