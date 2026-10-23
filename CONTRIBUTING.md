@@ -67,12 +67,12 @@ so decorating a test with an unregistered marker fails collection; a typo
 inside a `-m` expression does not error, it silently selects nothing, so
 check the collected count.
 
-The full suite takes well under a minute on CPU. On a machine with CUDA or
-Apple's MPS it can take minutes, because device selection is automatic and
-small tensors are slower on an accelerator; tests therefore pass
-`device="cpu"` explicitly unless they are about device handling, and new
-tests should do the same. New tests that need a GPU must carry
-`@pytest.mark.gpu` and skip themselves when none is present; one existing
+The full suite takes well under a minute on CPU. On CUDA or Apple's MPS it
+can take minutes, because small tensors are slower on an accelerator. The
+default device is the CPU, but tests still pass `device="cpu"` explicitly
+unless they are about device handling, and new tests should do the same.
+New tests that need a GPU must carry `@pytest.mark.gpu` and skip themselves
+when none is present; one existing
 test, `test_device_consistency` in `tests/test_integration.py`, predates
 the marker and only skips at runtime.
 
@@ -108,8 +108,12 @@ mkdocs serve        # http://127.0.0.1:8000, rebuilds on save
 mkdocs build --strict   # what CI runs; warnings fail the build
 ```
 
-The site is built on every PR but not published yet: publishing on GitHub
-Pages needs the repository owner to enable Pages.
+CI builds the site on every PR. The published site, <https://estcarisimo.github.io/bayesian_changepoint_detection/>,
+is built from `master` and deployed by a workflow on the maintainer's fork
+(`estcarisimo/bayesian_changepoint_detection`, `.github/workflows/pages.yml`),
+daily and on demand, because enabling Pages on this repository needs its
+owner. A merged docs change is live within a day; to publish at once, run
+that workflow by hand.
 
 ## Conventions
 
@@ -171,7 +175,10 @@ repository owner.
    package metadata. Bump it there.
 2. Move the `[Unreleased]` section of `CHANGELOG.md` under a new
    `[X.Y.Z] — YYYY-MM-DD` heading.
-3. Open a PR with those two changes and merge it.
+3. Update `version` and `date-released` in `CITATION.cff` and the version in
+   the README's BibTeX entry, and re-measure the README performance table
+   (`benchmarks/performance.py --versions current`, see
+   `benchmarks/README.md`). Open a PR with these changes and merge it.
 4. Optionally rehearse: run the `CD` workflow manually
    (`gh workflow run cd.yml -f target=testpypi`) to build and upload to
    TestPyPI, and install the result in a clean environment.

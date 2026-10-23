@@ -6,7 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-09-23
+
+No code change: the library behaves exactly as 1.2.0.
+
+### Changed
+
+- Removed a maintainer's personal email address from the package metadata,
+  `CODE_OF_CONDUCT.md` and `SECURITY.md`; private reports now start with an
+  issue asking for a private channel.
+
+## [1.2.0] — 2026-09-23
+
 ### Added
+
+- `benchmarks/tcpd.py`: detection quality on the Turing Change Point
+  Dataset (van den Burg and Williams, 2020) with TCPDBench's protocol and
+  metrics (F1 with margin 5 and covering, against five annotators;
+  `benchmarks/metrics.py`, ported from TCPDBench and tested against its
+  examples). The series are downloaded from a pinned TCPD commit and
+  checked against TCPD's checksums, not copied into the repository. On the
+  30 univariate series with a published BOCPD score, the online detector's
+  MAP segmentation reproduces TCPDBench's BOCPD (F1 0.694 against 0.696
+  with defaults, 0.887 against 0.890 tuned; identical F1 on 27 of the 31
+  series both score, which add the 2-D `run_log`), and the offline detector scores higher untuned (F1 0.739, cover
+  0.664). Results in `benchmarks/results/2026-09-23-tcpd.json`.
+
+- `benchmarks/performance.py`: reproducible timings of the offline, online
+  and streaming detectors against the released versions 0.4 (NumPy), 1.0.0
+  and 1.1.0 on the same series and parameters, each case in a fresh process,
+  with every run scored against the true changepoints. Protocol in
+  `benchmarks/README.md`; the README's performance table comes from
+  `benchmarks/results/2026-09-23-apple-m1-cpu.json` (1.2.0 re-measured; the
+  older versions from `2026-09-22-apple-m1-cpu.json`). It showed that 1.0.0's
+  multivariate online detector misses almost every change (F1 0.04), that
+  0.4's multivariate online detector crashes, and that the offline changepoint table is O(T³). CI runs
+  the quick suite on the current code so the harness cannot rot.
 
 - `negative_binomial_hazard(k, p, r)` (issue #23): the hazard of negative
   binomial segment lengths, `P(length = r + 1) / P(length >= r + 1)`, the
@@ -42,10 +77,17 @@ All notable changes to this project are documented here. The format follows
   generated from the docstrings by mkdocstrings), checked with
   `mkdocs build --strict` in CI. Its pages include sections of the README,
   so the two stay in sync. The `docs` extra now installs MkDocs instead of
-  Sphinx, which had no configuration in the repository. Not published yet.
+  Sphinx, which had no configuration in the repository. Published at
+  <https://estcarisimo.github.io/bayesian_changepoint_detection/>.
 
 ### Fixed
 
+- The example notebooks run again: `Multivariate_Example.ipynb` imported
+  `IndepentFeaturesLikelihood` (a typo for `IndependentFeaturesLikelihood`)
+  and applied NumPy functions to tensors; both passed the deprecated
+  `truncate`, and `Example_Code.ipynb` still recommended it for speed. Their
+  stored outputs (from much older versions) are cleared. CI now runs their
+  code cells (`examples/run_notebooks.py`).
 - `to_tensor` / `ensure_tensor` keep float64 precision when no `dtype` is
   given: float64 NumPy arrays, Python floats and float64 tensors stay
   float64 (float32 on MPS); integer and boolean input still becomes
@@ -93,6 +135,28 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The offline changepoint table `Pcp` is up to 19x faster and no longer
+  cubic in practice: the part of each row's sum that does not depend on the
+  changepoint index is built once, and rows stop once the probability of
+  that many changepoints falls below `exp(-1000)` (later rows are left
+  `-inf`; their true values are smaller still, and 0 in float64 either
+  way). Measured on an Apple M1 (CPU): 1 000 points 2.7 s to 0.53 s, 2 000
+  points 20 s to 2.1 s, 4 000 points 158 s to 8.3 s; 5-D `MultivariateT`,
+  2 000 points, 22 s to 3.0 s. Same changepoints in every case; computed
+  entries agree with a direct evaluation of the recursion to 1e-12, and
+  `exp(Pcp)` is unchanged.
+- **The default device is the CPU.** `get_device(None)`, and therefore every
+  likelihood, prior, hazard and generator built without `device`, now
+  returns the CPU; up to 1.1.0 it picked CUDA, then MPS, when present.
+  `get_device("auto")` keeps the old choice. `offline_changepoint_detection`
+  now follows the likelihood's device when `device` is omitted, as the online
+  detectors already did, so naming a device once on the likelihood is enough
+  for both. Only where results are computed changes (CPU and accelerator
+  results agree to float32 rounding, not bit for bit). On
+  the hardware measured (Apple M-series), the CPU was 6-30x faster than MPS
+  for the online detector, and the offline detector could not use MPS.
+  Users who relied on automatic GPU placement should pass `device="auto"`
+  (or `"cuda"`) to the likelihood.
 - The test marker `behaviour` is now `behavior` (`pytest -m behavior`), under
   the new rule that the project's identifiers use American English. No
   library names changed; none used British spellings.

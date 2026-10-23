@@ -92,13 +92,22 @@ jobs:
             python "$GITHUB_WORKSPACE/examples/$script.py"
             echo "::endgroup::"
           done
+          echo "::group::notebooks"
+          python "$GITHUB_WORKSPACE/examples/run_notebooks.py"
+          echo "::endgroup::"
+          # The benchmark harness, on the current code only, so it cannot rot.
+          # Timings from shared runners are not published.
+          echo "::group::benchmarks (quick suite)"
+          python "$GITHUB_WORKSPACE/benchmarks/performance.py" --suite quick --versions current --repeats 1
+          echo "::endgroup::"
           ls -l /tmp/examples-out
 
   docs:
     # Build the documentation site with --strict, so a broken link, a missing
     # README snippet section or a docstring mkdocstrings cannot parse fails
-    # the PR. The site is not deployed yet (GitHub Pages needs the repository
-    # owner to enable it); the built HTML is uploaded as an artifact.
+    # the PR. The built HTML is uploaded as an artifact. The published site is
+    # deployed from master by a workflow on the maintainer's fork (see
+    # CONTRIBUTING.md, "Documentation site").
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
