@@ -9,6 +9,7 @@ multivariate series.
 
 [![CI](https://github.com/hildensia/bayesian_changepoint_detection/actions/workflows/ci.yml/badge.svg)](https://github.com/hildensia/bayesian_changepoint_detection/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/bayesian-changepoint.svg)](https://pypi.org/project/bayesian-changepoint/)
+[![Docs](https://img.shields.io/badge/docs-online-blue.svg)](https://estcarisimo.github.io/bayesian_changepoint_detection/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/LICENSE)
 
@@ -227,11 +228,12 @@ mode. Read `changepoint_probabilities` when the exact position matters.
 
 ### Devices
 
-Every likelihood and both detectors take a `device` argument. Selection is
-automatic (CUDA, then MPS, then CPU); pass `device="cpu"` to the likelihood
-and the detector to opt out. On a laptop the CPU is the faster choice for
-the online detector (measured: 6–30x faster than MPS), and the offline
-detector always runs on the CPU under MPS because it needs float64. How the
+Every likelihood and both detectors take a `device` argument. The default
+is the CPU; name a device on the likelihood (`"cuda"`, `"mps"`, or `"auto"`
+for the first available) to opt into an accelerator, and the detectors
+follow it. On a laptop the CPU is the faster choice for the online detector
+(measured: 6–30x faster than MPS), and the offline detector always runs on
+the CPU under MPS because it needs float64. How the
 argument is resolved, what has been measured, how to time your own workload
 and how much memory the tables need: [docs/devices.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/docs/devices.md).
 
@@ -257,7 +259,8 @@ and how much memory the tables need: [docs/devices.md](https://github.com/hilden
 | `get_device`, `get_device_info`, `to_tensor` | device helpers |
 
 All public functions have NumPy-style docstrings with the formulas and the
-paper they come from.
+paper they come from; the [API reference](https://estcarisimo.github.io/bayesian_changepoint_detection/api/detectors/) on the
+documentation site is generated from them.
 
 <!-- --8<-- [end:usage] -->
 
@@ -278,8 +281,9 @@ bayesian_changepoint_detection/
 ```
 
 Supporting directories: `tests/` (the suite, see below), `examples/` (scripts
-and two notebooks, run in CI), `docs/` (pages whose code blocks are executed
-by the tests).
+and two notebooks, all run in CI), `docs/` (pages whose code blocks are executed
+by the tests), `benchmarks/` (timings across released versions, see
+Performance).
 
 ## 🧪 Development
 
@@ -319,8 +323,9 @@ pytest tests/test_online_detection.py -v
 ```
 
 Every test carries exactly one of the markers `math` and `behavior`;
-collection fails otherwise. Tests pass `device="cpu"` explicitly, because
-device selection is automatic and the suite is much slower on an accelerator.
+collection fails otherwise. Tests pass `device="cpu"` explicitly even though
+it is the default, so that a test never lands on an accelerator by accident
+(the suite is much slower there).
 The Python blocks in this README and in `docs/` are executed as part of the
 suite.
 
@@ -386,28 +391,67 @@ Other scripts in `examples/`: `basic_usage.py` (400 points, four segments,
 both detectors), `multivariate_example.py`, `gpu_acceleration.py` (device
 selection and CPU/GPU comparison), `benchmark_offline.py` (offline timing at
 several lengths), and the notebooks `Example_Code.ipynb` and
-`Multivariate_Example.ipynb`. The scripts run in CI on every push.
+`Multivariate_Example.ipynb`. The scripts, and the notebooks' code cells
+(`examples/run_notebooks.py`), run in CI on every push.
 
 ## ⚡ Performance
 <!-- --8<-- [start:performance] -->
 
-Both algorithms are O(T²) in the series length: the offline recursion is
-vectorized per start point (one `pdf_rows` call gives the likelihood of every
-segment starting there), the online recursion over run lengths at each step.
-Memory is also O(T²): the run-length posterior `R` is `(T+1)²` float32, the
-offline tables about `16 T²` bytes (see [docs/devices.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/docs/devices.md#memory)).
-`OnlineChangepointDetector` with `max_run_length=K` is O(K) in memory and
-time per observation instead.
+Measured with [`benchmarks/performance.py`](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/benchmarks/README.md), which runs the
+same series and parameters against this version, the previous release
+(1.1.0), the first PyTorch release (1.0.0) and the original NumPy
+implementation (0.4), each in a fresh process, and scores every run against
+the true changepoints (F1, margin 5). Apple M1, CPU, 4 threads, PyTorch 2.14,
+Python 3.12; median of up to five runs. Raw results, with more sizes:
+[`benchmarks/results/2026-09-23-apple-m1-cpu.json`](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/benchmarks/results/2026-09-23-apple-m1-cpu.json).
 
-Measured on an Apple M-series laptop, CPU, 4 threads, PyTorch 2.14:
+| Workload | 1.2.0 | 1.1.0 | 0.4 (NumPy) | 1.0.0 (PyTorch) |
+|---|---|---|---|---|
+| Offline `StudentT`, 1 000 points | 0.53 s | 3.1 s | 24 s | 108 s, misses changes (F1 0.50) |
+| Offline `StudentT`, 2 000 points | 2.0 s | 24 s | 101 s | not run (predicted 426 s) |
+| Offline `MultivariateT`, 5-D, 1 000 points | 0.94 s | 3.4 s | not available | 30 s |
+| Online `StudentT`, 1 000 points | 0.16 s | 0.13 s | 0.12 s | 39 s |
+| Online `StudentT`, 5 000 points | 1.9 s | 1.8 s | 2.0 s | not run (predicted 825 s) |
+| Online `MultivariateT`, 5-D, 1 000 points | 0.40 s | 0.37 s | crashes (`NameError`) | 51 s, wrong (F1 0.04) |
+| `OnlineChangepointDetector`, 50 000 points, `max_run_length=1000` | 7.9 s (160 µs per point) | not available | not available | not available |
 
-| Workload | Time |
-|---|---|
-| Offline `StudentT`, 1 000 points, `const_prior`, exact sum | 3.6 s (147 s before the vectorized likelihood of 1.1.0, same changepoints) |
-| Online `StudentT`, 1 000 points | 0.16 s |
-| Online `StudentT`, 5 000 points | 1.7 s |
-| Online `MultivariateT`, 10-D, 1 000 points | 0.56 s |
-| `OnlineChangepointDetector`, `StudentT`, 20 000 points, `max_run_length=500` | 2.6 s (128 µs per point, flat) |
+1.2.0 finds every change in each of these series (F1 1.00) except the
+streaming one (F1 0.94, 199 changes). In short: the offline detector is
+31–51x faster than the NumPy original, 206–360x faster than 1.0.0 (which
+also misses changes) and faster than 1.1.0 by a factor that grows with
+length (1.5x at 250 points, 6x at 1 000, 12x at 2 000); the online detector runs
+at the speed of the NumPy original (both are a Python loop over time), and
+its multivariate model is correct only since 1.1.0.
+
+Detection quality on real data, measured with [`benchmarks/tcpd.py`](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/benchmarks/README.md#detection-quality-on-real-data-tcpd)
+on the Turing Change Point Dataset (van den Burg and Williams, 2020; 30
+annotated real series, TCPDBench's F1 and covering metrics, higher is
+better):
+
+| Method, default settings | F1 | cover |
+|---|---|---|
+| No changepoints at all (baseline) | 0.668 | 0.575 |
+| BOCPD as published by TCPDBench (R package `ocp`) | 0.696 | 0.636 |
+| This library, online, `viterbi_changepoints` | 0.694 | 0.637 |
+| This library, offline | **0.739** | **0.664** |
+
+The online model reproduces the published BOCPD (identical F1 on 27 of the
+31 series both score, which add the 2-D `run_log` to these 30; also with
+tuned settings, 0.887 against 0.890); the offline
+detector beats it without tuning. For a finished series, use the offline
+detector, or read the online posterior with `viterbi_changepoints`. The
+online readout `get_map_changepoints` reports changes as data arrive,
+without hindsight, and scores 0.571 F1 on the same series.
+
+Complexity: the online recursion is O(T²) in time and memory (the
+run-length posterior `R` is `(T+1)²` float32); `OnlineChangepointDetector`
+with `max_run_length=K` is O(K) per observation. The offline recursion is
+O(T²) (vectorized per start point), and so, in practice, is the table of
+changepoint locations `Pcp`: it is O(J T²) for J rows, and rows stop once
+the probability of that many changepoints drops below `exp(-1000)` (about
+190 rows for a series with three clear changes, whatever its length; up
+to 19x faster than 1.1.0 at 4 000 points); memory is about
+`16 T²` bytes (see [docs/devices.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/docs/devices.md#memory)).
 
 Accelerators: see the FAQ; MPS is slower than the CPU on all of these, CUDA
 is unmeasured (issue #43). Only measured numbers appear in this README.
@@ -558,9 +602,10 @@ that the residuals look plausible.
 
 ### Why is it slow on my laptop with a GPU?
 
-Device selection is automatic and prefers CUDA or Apple MPS when present, but
-the online recursion is a sequential loop over small tensors, and each step
-on an accelerator pays a launch cost. Measured on an Apple M-series laptop
+Since 1.2.0 the default device is the CPU. Earlier versions selected CUDA or
+Apple MPS automatically when present, but the online recursion is a
+sequential loop over small tensors, and each step on an accelerator pays a
+launch cost. Measured on an Apple M-series laptop
 (PyTorch 2.14), CPU against MPS:
 
 | workload | CPU | MPS |
@@ -570,9 +615,9 @@ on an accelerator pays a launch cost. Measured on an Apple M-series laptop
 | online `MultivariateT`, 10-D, 1 000 points | 0.56 s | 17 s |
 
 The offline detector needs float64 and always runs on the CPU when MPS is
-selected. Pass `device="cpu"` to both the likelihood and the detector unless
-you have measured otherwise on your hardware; CUDA has not been benchmarked
-(issue #43).
+selected. On 1.1.0 or earlier, pass `device="cpu"` to both the likelihood
+and the detector. Opt into an accelerator only after measuring on your
+hardware; CUDA has not been benchmarked (issue #43).
 
 <!-- --8<-- [end:faq] -->
 
@@ -592,8 +637,9 @@ pinning a number says where the number comes from) and the review process.
 
 | Document | Contents |
 | --- | --- |
+| [Documentation site](https://estcarisimo.github.io/bayesian_changepoint_detection/) | Usage, devices, FAQ and the API reference, built from `master` |
 | [CONTRIBUTING.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CONTRIBUTING.md) | Development setup, conventions, releasing |
-| [CHANGELOG.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CHANGELOG.md) | Release history, including the numerical changes in 1.1.0 |
+| [CHANGELOG.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CHANGELOG.md) | Release history, including the numerical changes in each release |
 | [AGENTS.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/AGENTS.md) | Conventions for AI coding agents: the two `StudentT`s, index conventions, changing the math |
 | [SECURITY.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/SECURITY.md) | How to report a vulnerability |
 | [CODE_OF_CONDUCT.md](https://github.com/hildensia/bayesian_changepoint_detection/blob/master/CODE_OF_CONDUCT.md) | Community standards |
@@ -630,7 +676,7 @@ this repository" button reads [CITATION.cff](https://github.com/hildensia/bayesi
   author  = {Kulick, Johannes and Carisimo, Esteban},
   url     = {https://github.com/hildensia/bayesian_changepoint_detection},
   year    = {2026},
-  version = {1.1.0}
+  version = {1.2.1}
 }
 ```
 
